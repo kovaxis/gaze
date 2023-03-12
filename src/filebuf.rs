@@ -1,5 +1,8 @@
-use crate::prelude::*;
+use glyph_brush::ab_glyph::FontArc;
 
+use crate::{linemap::LineMap, prelude::*, sparse::SparseData};
+
+/*
 /// Indicates that the `line`th line (0-based) starts at file offset `offset`.
 #[derive(Clone, Copy)]
 pub struct LineMapping {
@@ -94,225 +97,50 @@ impl<'a> Iterator for LineMappingIter<'a> {
         Some(cur..nxt)
     }
 }
+*/
 
-struct SparseSegment {
-    offset: i64,
-    data: Vec<u8>,
-}
-
-pub struct SparseData {
-    segments: Vec<SparseSegment>,
-    file_size: i64,
-}
-impl SparseData {
-    fn new(file_size: i64) -> Self {
-        Self {
-            segments: default(),
-            file_size,
-        }
-    }
-
-    /// Find the index of the loaded segment that the given offset falls into.
-    /// If there is no such segment, returns the index of the next available
-    /// segment.
-    /// Note that in the latter case, there might be no next available segment.
-    /// In this case, the index will simply be the amount of segments.
-    fn find_segment(&self, offset: i64) -> StdResult<usize, usize> {
-        let i = self
-            .segments
-            .partition_point(|s| (s.offset + s.data.len() as i64) <= offset);
-        if let Some(s) = self.segments.get(i) {
-            if s.offset <= offset {
-                return Ok(i);
-            }
-        }
-        Err(i)
-    }
-
-    fn insert_segment(&mut self, mut offset: i64, mut data: Vec<u8>) {
-        let i = self
-            .segments
-            .binary_search_by_key(&offset, |s| s.offset + s.data.len() as i64)
-            .unwrap_or_else(|i| i);
-        let mut j = self
-            .segments
-            .binary_search_by_key(&(offset + data.len() as i64), |s| {
-                s.offset + s.data.len() as i64
-            })
-            .map(|i| i + 1)
-            .unwrap_or_else(|i| i);
-        if let Some(s) = self.segments.get_mut(i) {
-            if s.offset < offset {
-                // this segment intersects with the start of the inserted segment
-                s.data
-                    .truncate(usize::try_from(offset - s.offset).expect("read too large"));
-                s.data.extend_from_slice(&data);
-                offset = s.offset;
-                mem::swap(&mut data, &mut s.data);
-            }
-        }
-        if let Some(s) = self.segments.get_mut(j) {
-            if (offset + data.len() as i64) >= s.offset {
-                // this segment intersects with the end of the inserted segment
-                data.extend_from_slice(
-                    &s.data[usize::try_from(offset + data.len() as i64 - s.offset)
-                        .expect("read too large")..],
-                );
-                j += 1;
-            }
-        }
-        self.segments
-            .splice(i..j, std::iter::once(SparseSegment { offset, data }));
-    }
-
-    /// Iterate over all available segments of data in the range `[lo, hi)`.
-    pub fn iter(&self, mut lo: i64, hi: i64) -> SparseIter {
-        let mut i = self
-            .segments
-            .partition_point(|s| (s.offset + s.data.len() as i64) <= lo);
-        let mut next_data = &[][..];
-        if let Some(s) = self.segments.get(i) {
-            if s.offset > lo && s.offset < hi {
-                lo = s.offset;
-            }
-            if s.offset <= lo {
-                // this segment contains a prefix!
-                next_data = &s.data
-                    [(lo - s.offset) as usize..(hi - s.offset).min(s.data.len() as i64) as usize];
-                i += 1;
-            }
-        }
-        SparseIter {
-            data: self,
-            cur_offset: lo,
-            cur_data: next_data,
-            next_seg: i,
-            hi,
-        }
-    }
-}
-
-pub struct SparseIter<'a> {
-    data: &'a SparseData,
-    cur_offset: i64,
-    cur_data: &'a [u8],
-    next_seg: usize,
-    hi: i64,
-}
-impl<'a> Iterator for SparseIter<'a> {
-    type Item = (i64, &'a [u8]);
-    fn next(&mut self) -> Option<(i64, &'a [u8])> {
-        if self.cur_data.is_empty() {
-            return None;
-        }
-        let out = (self.cur_offset, self.cur_data);
-        self.cur_data = &[][..];
-        if let Some(s) = self.data.segments.get(self.next_seg) {
-            if s.offset < self.hi {
-                self.cur_offset = s.offset;
-                self.cur_data = &s.data[..(self.hi - s.offset).min(s.data.len() as i64) as usize];
-                self.next_seg += 1;
-            }
-        }
-        Some(out)
-    }
+pub struct LoadedData {
+    pub linemap: LineMap,
+    pub data: SparseData,
 }
 
 struct Shared {
     file_size: i64,
     read_size: usize,
+    load_radius: i64,
     stop: AtomicCell<bool>,
     lineloading: AtomicCell<bool>,
-    hot_line: AtomicCell<i64>,
-    linemap: Mutex<LineMap>,
-    loaded: Mutex<SparseData>,
-}
-
-fn run_lineloader(mut file: File, shared: Arc<Shared>) -> Result<()> {
-    let start = Instant::now();
-    let mut buf = vec![0; 64 * 1024];
-    let mut offset = 0;
-    let mut linenum = 0;
-    shared
-        .linemap
-        .lockf()
-        .anchors
-        .push(LineMapping { line: 0, offset: 0 });
-    loop {
-        let count = file.read(&mut buf)?;
-        if count == 0 {
-            break;
-        }
-        if shared.stop.load() {
-            break;
-        }
-        let mut linemap = shared.linemap.lockf();
-        if shared.stop.load() {
-            break;
-        }
-        for (i, &b) in buf.iter().enumerate().take(count) {
-            if b == b'\n' {
-                linenum += 1;
-                linemap.anchors.push(LineMapping {
-                    line: linenum,
-                    offset: offset + i as i64 + 1,
-                });
-            }
-        }
-        offset += count as i64;
-    }
-    shared.linemap.lockf().anchors.push(LineMapping {
-        line: linenum + 1,
-        offset,
-    });
-    shared.lineloading.store(false);
-    eprintln!(
-        "finished lineloading file in {:2}s",
-        start.elapsed().as_secs_f64()
-    );
-    Ok(())
+    hot_offset: AtomicCell<i64>,
+    loaded: Mutex<LoadedData>,
 }
 
 struct FileManager {
     shared: Arc<Shared>,
     file: File,
-    lineloader: JoinHandle<Result<()>>,
 }
 impl FileManager {
-    fn new(shared: Arc<Shared>, file: [File; 2]) -> Self {
-        let [file, file2] = file;
-        let lineloader = {
-            let shared = shared.clone();
-            thread::spawn(move || run_lineloader(file2, shared))
-        };
-        Self {
-            shared,
-            file,
-            lineloader,
-        }
+    fn new(shared: Arc<Shared>, file: File) -> Self {
+        Self { shared, file }
     }
 
     fn run(self) -> Result<()> {
         while !self.shared.stop.load() {
-            let hot_line = self.shared.hot_line.load();
-            // map hot line to hot offset
-            let hot_offset = self.shared.linemap.lockf().map_approx(hot_line);
-            // load data around the hot offset
+            let hot_offset = self.shared.hot_offset.load();
             {
                 let mut loaded = self.shared.loaded.lockf();
+                // load data around the hot offset
                 let read_size = self.shared.read_size as i64;
-                let (l, r) = match loaded.find_segment(hot_offset) {
+                let (l, r) = match loaded.data.find_segment(hot_offset) {
                     Ok(i) => {
                         // the hot offset itself is already loaded
                         // load either just before or just after the loaded segment
-                        let lside = loaded.segments[i].offset;
-                        let rside =
-                            loaded.segments[i].offset + loaded.segments[i].data.len() as i64;
+                        let lside = loaded.data[i].offset;
+                        let rside = loaded.data[i].offset + loaded.data[i].data.len() as i64;
                         if hot_offset - lside < rside - hot_offset {
                             // load left side
                             (
                                 loaded
-                                    .segments
+                                    .data
                                     .get(i.wrapping_sub(1))
                                     .map(|s| s.offset + s.data.len() as i64)
                                     .unwrap_or(0)
@@ -324,7 +152,7 @@ impl FileManager {
                             (
                                 rside,
                                 loaded
-                                    .segments
+                                    .data
                                     .get(i + 1)
                                     .map(|s| s.offset)
                                     .unwrap_or(self.shared.file_size)
@@ -334,13 +162,13 @@ impl FileManager {
                     }
                     Err(i) => (
                         loaded
-                            .segments
+                            .data
                             .get(i.wrapping_sub(1))
                             .map(|s| s.offset + s.data.len() as i64)
                             .unwrap_or(0)
                             .max(hot_offset - read_size / 2),
                         loaded
-                            .segments
+                            .data
                             .get(i)
                             .map(|s| s.offset)
                             .unwrap_or(self.shared.file_size)
@@ -355,25 +183,19 @@ impl FileManager {
             // nothing to load, make sure to idle respectfully
             thread::park();
         }
-        self.lineloader
-            .join()
-            .expect("lineloader thread panicked")?;
         Ok(())
     }
 
-    fn load_segment(&self, loaded: &mut SparseData, offset: i64, len: usize) -> Result<()> {
+    fn load_segment(&self, loaded: &mut LoadedData, offset: i64, len: usize) -> Result<()> {
         let mut read_buf = vec![0; len];
         (&self.file).seek(io::SeekFrom::Start(offset as u64))?;
         (&self.file).read_exact(&mut read_buf)?;
-        loaded.insert_segment(offset, read_buf);
+        loaded.linemap.process_data(offset, &read_buf);
+        loaded.data.insert_segment(offset, read_buf);
 
         eprintln!("loaded segment [{}, {})", offset, offset + len as i64);
-        eprint!("new segments:");
-        for seg in loaded.segments.iter() {
-            eprint!(" [{}, {})", seg.offset, seg.offset + seg.data.len() as i64);
-        }
-        eprintln!();
-
+        eprintln!("new sparse segments: {:?}", loaded.data);
+        eprintln!("new linemap segments: {:?}", loaded.linemap);
         Ok(())
     }
 }
@@ -392,7 +214,7 @@ impl Drop for FileBuffer {
     }
 }
 impl FileBuffer {
-    pub fn open(path: &Path) -> Result<FileBuffer> {
+    pub fn open(path: &Path, font: FontArc) -> Result<FileBuffer> {
         // TODO: Do not do file IO on the main thread
         // This requires the file size to be set to 0 for a while
         let mut file = File::open(path)?;
@@ -407,14 +229,18 @@ impl FileBuffer {
             read_size: 64 * 1024,
             stop: false.into(),
             lineloading: true.into(),
-            hot_line: 0.into(),
-            linemap: LineMap::new(file_size).into(),
-            loaded: SparseData::new(file_size).into(),
+            hot_offset: 0.into(),
+            load_radius: 1000,
+            loaded: LoadedData {
+                data: SparseData::new(file_size),
+                linemap: LineMap::new(font, 1024 * 1024, file_size),
+            }
+            .into(),
         });
         let manager = {
             let shared = shared.clone();
             thread::spawn(move || {
-                FileManager::new(shared, [file, file2]).run()?;
+                FileManager::new(shared, file).run()?;
                 eprintln!("manager thread finishing");
                 Ok(())
             })
@@ -423,14 +249,45 @@ impl FileBuffer {
     }
 
     pub fn access_data(&self, f: impl FnOnce(&LineMap, &SparseData)) {
-        let linemap = self.shared.linemap.lockf();
-        let data = self.shared.loaded.lockf();
-        f(&*linemap, &*data)
+        let loaded = self.shared.loaded.lockf();
+        f(&loaded.linemap, &loaded.data)
     }
 
-    pub fn set_hot_line(&self, hot_line: i64) {
-        let old = self.shared.hot_line.swap(hot_line);
-        if hot_line != old {
+    pub fn iter_lines(
+        &self,
+        base_offset: i64,
+        min: DVec2,
+        max: DVec2,
+        mut f: impl FnMut(f64, i64, &[u8]),
+    ) {
+        let loaded = self.shared.loaded.lockf();
+        let y0 = min.y.floor() as i64;
+        let y1 = max.y.ceil() as i64;
+        for y in y0..y1 {
+            if let Some([lo, hi, base]) =
+                loaded
+                    .linemap
+                    .scanline_to_anchors(base_offset, y, (min.x, max.x))
+            {
+                let linedata = loaded.data.longest_prefix(lo.offset, hi.offset);
+                let dx = lo.x().get() - base.x().get();
+                let mut dy = lo.relative_y - base.relative_y;
+                eprintln!(
+                    "drawing line at y = {}, with dy = {}, dx = {}, and {} bytes",
+                    y,
+                    dy,
+                    dx,
+                    linedata.len()
+                );
+                // TODO: Strip the trailing characters from previous lines
+                f(dx, dy, linedata);
+            }
+        }
+    }
+
+    pub fn set_hot_pos(&self, pos: &mut ScrollPos) {
+        let old = self.shared.hot_offset.swap(pos.base_offset);
+        if pos.base_offset != old {
             self.manager.thread().unpark();
         }
     }
@@ -438,4 +295,26 @@ impl FileBuffer {
     pub fn file_size(&self) -> i64 {
         self.shared.file_size
     }
+}
+
+/// Represents a position within the file, in such a way that as the file gets
+/// loaded the scroll position stays as still as possible.
+///
+/// The scrolling position represented is the top-left corner of the screen.
+pub struct ScrollPos {
+    /// The base offset within the file used as a reference.
+    /// Using this offset, the backend can load the file around this
+    /// offset and build a local map of how the file looks like.
+    /// Changes to this offset can be "seamless", like automatic rebasing
+    /// of the offset, or can be "jagged", like forcefully scrolling to the
+    /// end of the file.
+    /// Moving the base offset across two separate segments in the line map
+    /// is always a jagged movement, and should not be triggerable with smooth
+    /// scrolling methods like the mouse wheel or dragging, only through the
+    /// scroll bar.
+    pub base_offset: i64,
+    /// A difference in visual X position from the base offset, in standard font height units.
+    pub delta_x: f64,
+    /// A difference in visual Y position from the base offset, as a fractional number of lines.
+    pub delta_y: f64,
 }

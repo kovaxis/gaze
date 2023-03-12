@@ -1,4 +1,4 @@
-use glyph_brush::ab_glyph::{Font, FontArc, GlyphId};
+use glyph_brush::ab_glyph::{Font, FontArc};
 
 use crate::prelude::*;
 
@@ -30,20 +30,24 @@ pub struct LineMap {
     file_size: i64,
     font: FontArc,
     replacement_width: f32,
+    scale: f32,
 }
 impl LineMap {
     pub const REPLACEMENT_CHAR: char = char::REPLACEMENT_CHARACTER;
 
     pub fn new(font: FontArc, max_memory: usize, file_size: i64) -> Self {
         let max_anchors = max_memory / mem::size_of::<Anchor>();
-        let bytes_per_anchor =
-            usize::try_from(file_size / max_anchors as i64).expect("file too large");
+        let bytes_per_anchor = usize::try_from(file_size / max_anchors as i64)
+            .expect("file too large")
+            .max(mem::size_of::<Anchor>()); // reasonable minimum
+        let scale = font.height_unscaled().recip();
         Self {
             segments: default(),
             bytes_per_anchor,
             file_size,
+            scale,
             replacement_width: font.h_advance_unscaled(font.glyph_id(Self::REPLACEMENT_CHAR))
-                / font.line_gap_unscaled(),
+                * scale,
             font,
         }
     }
@@ -70,6 +74,40 @@ impl LineMap {
         self.segments.len()
     }
 
+    /// Maps the given base offset and a delta range to a pair of anchors that contain the scanline.
+    /// Note that these anchors might have Y coordinates different to `dy`.
+    /// Returns as a third value the reference anchor, against which the `dy` and `dx` values were
+    /// operated.
+    pub fn scanline_to_anchors(
+        &self,
+        base_offset: i64,
+        dy: i64,
+        dx: (f64, f64),
+    ) -> Option<[Anchor; 3]> {
+        let i = self.find_after(base_offset);
+        if let Some(s) = self.segments.get(i) {
+            if s.start <= base_offset {
+                // The base offset is contained within a loaded segment
+                let base = s.find_lower(base_offset)?;
+                if !base.x().is_abs() && dy != 0 {
+                    // When we use a non-absolute base, it means we haven't loaded before
+                    // the start of the current line.
+                    // Additionally, we don't know the relationship between the X coordinates
+                    // of following lines and the base line, therefore if we draw the following
+                    // lines it would involve a large amount of dizzy moving text
+                    return None;
+                }
+                let y = base.relative_y + dy;
+                let x0 = base.x().get() + dx.0;
+                let x1 = base.x().get() + dx.1;
+                let lo = s.locate_lower(y, x0)?;
+                let hi = s.locate_upper(y, x1)?;
+                return Some([lo, hi, base]);
+            }
+        }
+        None
+    }
+
     fn create_segment(&self, offset: i64, data: &[u8]) -> MappedSegment {
         let mut seg = {
             let mut first_bytes_buf = [0; 4];
@@ -83,11 +121,11 @@ impl LineMap {
                 last_bytes_buf,
                 first_bytes_buf,
                 y_absolute: offset == 0,
+                end_y: 0,
                 end_x: PosX::Rel(0.),
                 anchors: Vec::with_capacity(data.len() / self.bytes_per_anchor + 1),
             }
         };
-        let scale = self.font.line_gap_unscaled().recip();
         let mut anchor_acc = self.bytes_per_anchor;
         let mut i = 0;
         let mut cur_x = 0.;
@@ -126,10 +164,11 @@ impl LineMap {
                 }
                 Some(c) => {
                     let glyph = self.font.glyph_id(c);
-                    cur_x += (self.font.h_advance_unscaled(glyph) * scale) as f64;
+                    cur_x += (self.font.h_advance_unscaled(glyph) * self.scale) as f64;
                 }
             }
         }
+        seg.end_y = cur_y;
         seg.end_x = if abs_x {
             PosX::Abs(cur_x)
         } else {
@@ -206,8 +245,8 @@ impl LineMap {
                         break;
                     }
                 }
-                x_nudge += (self.font.h_advance_unscaled(self.font.glyph_id(c))
-                    * self.font.line_gap_unscaled().recip()) as f64
+                x_nudge += (self.font.h_advance_unscaled(self.font.glyph_id(c)) * self.scale)
+                    as f64
                     - clen as f64 * self.replacement_width as f64;
             }
         }
@@ -215,13 +254,11 @@ impl LineMap {
         // Nudge all relative-x anchors on the right side by whatever was the last X position
         // Also, if the last segment ends on an absolute X position, make the relative-x positions
         // on the right side absolute
-        let (x_nudge, make_abs) = match left.end_x {
-            PosX::Rel(x) => (x_nudge + x, false),
-            PosX::Abs(x) => (x_nudge + x, true),
-        };
+        x_nudge += left.end_x.get();
         for anchor in anchors[n..].iter_mut() {
+            anchor.relative_y += left.end_y;
             if let PosX::Rel(x) = anchor.x() {
-                anchor.set_x(x + x_nudge, make_abs);
+                anchor.set_x(x + x_nudge, left.end_x.is_abs());
             } else {
                 break;
             }
@@ -247,9 +284,10 @@ impl LineMap {
             last_bytes_buf: bytes_suffix,
             first_bytes_buf: bytes_prefix,
             y_absolute: left.y_absolute,
-            end_x: match (right.end_x, make_abs) {
-                (PosX::Rel(x), false) => PosX::Rel(x),
-                (PosX::Rel(x), true) => PosX::Abs(x),
+            end_y: left.end_y + right.end_y,
+            end_x: match (right.end_x, left.end_x.is_abs()) {
+                (PosX::Rel(x), false) => PosX::Rel(left.end_x.get() + x),
+                (PosX::Rel(x), true) => PosX::Abs(left.end_x.get() + x),
                 (PosX::Abs(x), _) => PosX::Abs(x),
             },
             anchors,
@@ -329,6 +367,26 @@ impl LineMap {
         }
     }
 }
+impl fmt::Debug for LineMap {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "(")?;
+        let mut first = true;
+        for s in self.segments.iter() {
+            if first {
+                first = false;
+            } else {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "{{ range: [{}, {}), y_absolute: {:?}, end_y: {}, end_x: {:?}, anchors: {:?} }}",
+                s.start, s.end, s.y_absolute, s.end_y, s.end_x, s.anchors
+            )?;
+        }
+        write!(f, ")")?;
+        Ok(())
+    }
+}
 
 pub struct MappedSegment {
     /// Inclusive start of this segment in absolute bytes.
@@ -344,6 +402,9 @@ pub struct MappedSegment {
     /// `true` if this segment starts at the beggining of the file, and therefore line
     /// numbers are actually absolute.
     y_absolute: bool,
+    /// The Y coordinate of the segment's end edge.
+    /// Used to shift the Y coordinates of segments that are merged with this segment.
+    end_y: i64,
     /// The X coordinate of the segment's end edge.
     /// Might be absolute or relative.
     end_x: PosX,
@@ -359,9 +420,48 @@ impl MappedSegment {
             last_bytes_buf: [0; 4],
             first_bytes_buf: [0; 4],
             y_absolute: false,
+            end_y: 0,
             end_x: PosX::Abs(0.),
             anchors: vec![],
         }
+    }
+
+    /// Find the last anchor before or at the given offset.
+    fn find_lower(&self, offset: i64) -> Option<Anchor> {
+        match self.anchors.partition_point(|a| a.offset <= offset) {
+            0 => None,
+            i => Some(self.anchors[i - 1]),
+        }
+    }
+
+    /// Find the first anchor at or after the given offset.
+    fn find_upper(&self, offset: i64) -> Option<Anchor> {
+        self.anchors
+            .get(self.anchors.partition_point(|a| a.offset < offset))
+            .copied()
+    }
+
+    /// Find the last anchor before or at the given relative Y, breaking ties by
+    /// choosing the largest relative/absolute X before the given relative/absolute X.
+    fn locate_lower(&self, y: i64, x: f64) -> Option<Anchor> {
+        match self
+            .anchors
+            .partition_point(|a| a.relative_y < y || a.relative_y == y && a.x().get() <= x)
+        {
+            0 => None,
+            i => Some(self.anchors[i - 1]),
+        }
+    }
+
+    /// Find the first anchor at or after the given relative Y, breaking ties by
+    /// choosing the smallest relative/absolute X after the given relative/absolute X.
+    fn locate_upper(&self, y: i64, x: f64) -> Option<Anchor> {
+        self.anchors
+            .get(
+                self.anchors
+                    .partition_point(|a| a.relative_y < y || a.relative_y == y && a.x().get() < x),
+            )
+            .copied()
     }
 }
 
@@ -402,14 +502,29 @@ fn decode_utf8(b: &[u8]) -> Option<(char, usize)> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum PosX {
+#[derive(Clone, Copy, Debug)]
+pub enum PosX {
     Abs(f64),
     Rel(f64),
 }
+impl PosX {
+    pub fn get(&self) -> f64 {
+        match self {
+            &Self::Abs(x) => x,
+            &Self::Rel(x) => x,
+        }
+    }
+
+    pub fn is_abs(&self) -> bool {
+        match self {
+            &Self::Abs(_) => true,
+            &Self::Rel(_) => false,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
-struct Anchor {
+pub struct Anchor {
     /// The absolute byte offset that this anchor marks.
     pub offset: i64,
     /// The line number relative to the start of the containing segment.
@@ -418,6 +533,17 @@ struct Anchor {
     /// in its segment), or absolute.
     /// This is packed into the sign bit, which is why this is stored as a `u64`.
     pub relabs_x: u64,
+}
+impl fmt::Debug for Anchor {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "Anchor {{ offset: {}, y: {}, x: {:?} }}",
+            self.offset,
+            self.relative_y,
+            self.x()
+        )
+    }
 }
 impl Anchor {
     fn new(offset: i64, x: f64, rel_y: i64, absolute_x: bool) -> Self {

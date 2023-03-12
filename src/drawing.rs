@@ -23,7 +23,6 @@ gl::glium::implement_vertex!(TextVertex,
 );
 
 pub struct DrawState {
-    font: FontArc,
     glyph: GlyphBrush<[TextVertex; 6]>,
     texture: Texture2d,
     vbo: VertexBuffer<TextVertex>,
@@ -31,15 +30,12 @@ pub struct DrawState {
     shader: Program,
 }
 impl DrawState {
-    pub fn new(display: &Display) -> Result<Self> {
-        let font =
-            FontArc::try_from_vec(fs::read("font.ttf").context("failed to read font file")?)?;
+    pub fn new(display: &Display, font: &FontArc) -> Result<Self> {
         let cache_size = (512, 512);
         Ok(Self {
             glyph: GlyphBrushBuilder::using_font(font.clone())
                 .initial_cache_size(cache_size)
                 .build(),
-            font,
             texture: Texture2d::empty(display, cache_size.0, cache_size.1)?,
             vbo: VertexBuffer::empty_dynamic(display, 1024)?,
             vbo_len: 0,
@@ -70,15 +66,42 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
     }
     let (w, h) = frame.get_dimensions();
 
-    let linerange = (
-        state.scroll.floor() as i64,
-        (state.scroll + (h as f32 / state.k.font_height) as f64).ceil() as i64,
-    );
+    let min_draw = dvec2(state.scroll.delta_x, state.scroll.delta_y);
+    let max_draw = min_draw
+        + dvec2(
+            (w as f64 - state.k.left_bar as f64) / state.k.font_height as f64,
+            h as f64 / state.k.font_height as f64,
+        );
 
     let prelock = Instant::now();
     let mut prefile = Instant::now();
 
     if let Some(file) = state.file.as_ref() {
+        // TODO: Line numbers
+        let mut linenum_buf = String::new();
+        file.iter_lines(
+            state.scroll.base_offset,
+            min_draw,
+            max_draw,
+            |dx, dy, rawtext| {
+                prefile = Instant::now();
+
+                let text = String::from_utf8_lossy(rawtext);
+                let pos = dvec2(dx - min_draw.x, dy as f64 - min_draw.y).as_vec2();
+                state.draw.glyph.queue(
+                    Section::new()
+                        .add_text(
+                            Text::new(&text)
+                                .with_scale(state.k.font_height)
+                                .with_color(state.k.text_color),
+                        )
+                        .with_screen_position((state.k.left_bar + pos.x, pos.y))
+                        .with_layout(Layout::default()),
+                );
+            },
+        );
+        file.set_hot_pos(&mut state.scroll);
+        /*
         file.access_data(|linemap, data| {
             prefile = Instant::now();
             let mut linenum_buf = String::new();
@@ -123,8 +146,8 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
                     );
                 }
             }
-        });
-        file.set_hot_line((linerange.0 + linerange.1) / 2);
+        });*/
+        //file.set_hot_line((linerange.0 + linerange.1) / 2);
     }
 
     let preuploadtex = Instant::now();
