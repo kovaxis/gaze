@@ -1,4 +1,4 @@
-use crate::{linemap::MappedSegment, prelude::*};
+use crate::prelude::*;
 
 pub struct SparseSegment {
     pub offset: i64,

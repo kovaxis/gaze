@@ -1,6 +1,11 @@
 use glyph_brush::ab_glyph::FontArc;
 
-use crate::{linemap::LineMap, prelude::*, sparse::SparseData};
+use crate::{filebuf::linemap::LineMap, filebuf::sparse::SparseData, prelude::*};
+
+use self::linemap::LineMapper;
+
+mod linemap;
+mod sparse;
 
 /*
 /// Indicates that the `line`th line (0-based) starts at file offset `offset`.
@@ -106,8 +111,6 @@ pub struct LoadedData {
 
 struct Shared {
     file_size: i64,
-    read_size: usize,
-    load_radius: i64,
     stop: AtomicCell<bool>,
     lineloading: AtomicCell<bool>,
     hot_offset: AtomicCell<i64>,
@@ -117,20 +120,29 @@ struct Shared {
 struct FileManager {
     shared: Arc<Shared>,
     file: File,
+    linemapper: LineMapper,
+    read_size: usize,
+    load_radius: i64,
 }
 impl FileManager {
-    fn new(shared: Arc<Shared>, file: File) -> Self {
-        Self { shared, file }
+    fn new(shared: Arc<Shared>, file: File, max_memory: usize, font: FontArc) -> Self {
+        Self {
+            linemapper: LineMapper::new(font, max_memory, shared.file_size),
+            file,
+            shared,
+            read_size: 64 * 1024,
+            load_radius: 1000,
+        }
     }
 
     fn run(self) -> Result<()> {
         while !self.shared.stop.load() {
             let hot_offset = self.shared.hot_offset.load();
-            {
-                let mut loaded = self.shared.loaded.lockf();
+            let (l, r) = {
+                let mut loaded = self.shared.loaded.lock();
                 // load data around the hot offset
-                let read_size = self.shared.read_size as i64;
-                let (l, r) = match loaded.data.find_segment(hot_offset) {
+                let read_size = self.read_size as i64;
+                match loaded.data.find_segment(hot_offset) {
                     Ok(i) => {
                         // the hot offset itself is already loaded
                         // load either just before or just after the loaded segment
@@ -174,23 +186,26 @@ impl FileManager {
                             .unwrap_or(self.shared.file_size)
                             .min(hot_offset + read_size / 2),
                     ),
-                };
-                if l < r {
-                    self.load_segment(&mut loaded, l, (r - l) as usize)?;
-                    continue;
                 }
+            };
+            // Load the found segment
+            if l < r {
+                self.load_segment(l, (r - l) as usize)?;
+                continue;
             }
-            // nothing to load, make sure to idle respectfully
+            // Nothing to load, make sure to idle respectfully
             thread::park();
         }
         Ok(())
     }
 
-    fn load_segment(&self, loaded: &mut LoadedData, offset: i64, len: usize) -> Result<()> {
+    fn load_segment(&self, offset: i64, len: usize) -> Result<()> {
         let mut read_buf = vec![0; len];
         (&self.file).seek(io::SeekFrom::Start(offset as u64))?;
         (&self.file).read_exact(&mut read_buf)?;
-        loaded.linemap.process_data(offset, &read_buf);
+        self.linemapper
+            .process_data(&self.shared.loaded, offset, &read_buf);
+        let mut loaded = self.shared.loaded.lock();
         loaded.data.insert_segment(offset, read_buf);
 
         eprintln!("loaded segment [{}, {})", offset, offset + len as i64);
@@ -226,31 +241,25 @@ impl FileBuffer {
         let file2 = File::open(path).context("failed to reopen file for parallel lineloading")?;
         let shared = Arc::new(Shared {
             file_size,
-            read_size: 64 * 1024,
             stop: false.into(),
             lineloading: true.into(),
             hot_offset: 0.into(),
-            load_radius: 1000,
             loaded: LoadedData {
                 data: SparseData::new(file_size),
-                linemap: LineMap::new(font, 1024 * 1024, file_size),
+                linemap: LineMap::new(),
             }
             .into(),
         });
+        let max_linemap_memory = 1024 * 1024;
         let manager = {
             let shared = shared.clone();
             thread::spawn(move || {
-                FileManager::new(shared, file).run()?;
+                FileManager::new(shared, file, max_linemap_memory, font).run()?;
                 eprintln!("manager thread finishing");
                 Ok(())
             })
         };
         Ok(Self { manager, shared })
-    }
-
-    pub fn access_data(&self, f: impl FnOnce(&LineMap, &SparseData)) {
-        let loaded = self.shared.loaded.lockf();
-        f(&loaded.linemap, &loaded.data)
     }
 
     pub fn iter_lines(
@@ -260,7 +269,7 @@ impl FileBuffer {
         max: DVec2,
         mut f: impl FnMut(f64, i64, &[u8]),
     ) {
-        let loaded = self.shared.loaded.lockf();
+        let loaded = self.shared.loaded.lock();
         let y0 = min.y.floor() as i64;
         let y1 = max.y.ceil() as i64;
         for y in y0..y1 {
@@ -270,8 +279,9 @@ impl FileBuffer {
                     .scanline_to_anchors(base_offset, y, (min.x, max.x))
             {
                 let linedata = loaded.data.longest_prefix(lo.offset, hi.offset);
-                let dx = lo.x().get() - base.x().get();
-                let mut dy = lo.relative_y - base.relative_y;
+                // NOTE: This subtraction makes no sense if one is relative and the other is absolute
+                let dx = lo.x_offset - base.x_offset;
+                let mut dy = lo.y_offset - base.y_offset;
                 eprintln!(
                     "drawing line at y = {}, with dy = {}, dx = {}, and {} bytes",
                     y,

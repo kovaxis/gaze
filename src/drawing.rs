@@ -86,8 +86,10 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
             |dx, dy, rawtext| {
                 prefile = Instant::now();
 
+                // Draw the visible window of this line
                 let text = String::from_utf8_lossy(rawtext);
-                let pos = dvec2(dx - min_draw.x, dy as f64 - min_draw.y).as_vec2();
+                let pos =
+                    dvec2(dx - min_draw.x, dy as f64 - min_draw.y).as_vec2() * state.k.font_height;
                 state.draw.glyph.queue(
                     Section::new()
                         .add_text(
@@ -97,6 +99,25 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
                         )
                         .with_screen_position((state.k.left_bar + pos.x, pos.y))
                         .with_layout(Layout::default()),
+                );
+
+                // Draw the line number
+                linenum_buf.clear();
+                {
+                    use std::fmt::Write;
+                    let _ = write!(linenum_buf, "{}", dy + 1);
+                }
+                let linenum_x = state.k.left_bar - state.k.linenum_pad;
+                state.draw.glyph.queue(
+                    Section::new()
+                        .add_text(
+                            Text::new(&linenum_buf)
+                                .with_scale(state.k.font_height)
+                                .with_color(state.k.linenum_color),
+                        )
+                        .with_screen_position((linenum_x, pos.y))
+                        .with_bounds((linenum_x, h as f32 - pos.y))
+                        .with_layout(Layout::default_single_line().h_align(HorizontalAlign::Right)),
                 );
             },
         );

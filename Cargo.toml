@@ -14,6 +14,7 @@ glyph_brush = "0.7"
 glam = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+parking_lot = "0.12"
 
 [workspace]
 members = [

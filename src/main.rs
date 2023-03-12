@@ -19,6 +19,7 @@ mod prelude {
         dvec2, dvec3, dvec4, vec2, vec3, vec4, DVec2, DVec3, DVec4, Mat2, Mat3, Mat4, Vec2, Vec3,
         Vec4,
     };
+    pub use parking_lot::{Mutex, MutexGuard};
     pub use serde::{Deserialize, Serialize};
     pub use std::{
         fmt,
@@ -27,21 +28,10 @@ mod prelude {
         mem, ops,
         path::{Path, PathBuf},
         result::Result as StdResult,
-        sync::{Arc, Mutex, RwLock},
+        sync::Arc,
         thread::{self, JoinHandle},
         time::{Duration, Instant},
     };
-
-    pub trait MutexLock {
-        type Inner;
-        fn lockf(&self) -> std::sync::MutexGuard<Self::Inner>;
-    }
-    impl<T> MutexLock for Mutex<T> {
-        type Inner = T;
-        fn lockf(&self) -> std::sync::MutexGuard<T> {
-            self.lock().unwrap()
-        }
-    }
 
     pub fn default<T: Default>() -> T {
         T::default()
@@ -51,8 +41,6 @@ mod prelude {
 mod cfg;
 mod drawing;
 mod filebuf;
-mod linemap;
-mod sparse;
 
 pub struct WindowState {
     font: FontArc,
