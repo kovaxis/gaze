@@ -29,7 +29,7 @@ pub struct LineMap {
     ///
     /// TODO: Set an upper limit on the amount of linemap segments before
     /// dropping small/old segments.
-    segments: Vec<MappedSegment>,
+    pub(super) segments: Vec<MappedSegment>,
 }
 impl LineMap {
     pub fn new() -> Self {
@@ -128,11 +128,11 @@ macro_rules! lock_linemap {
 }
 
 pub struct LineMapper {
-    bytes_per_anchor: usize,
-    font: FontArc,
-    replacement_width: f32,
-    scale: f32,
-    migrate_batch_size: usize,
+    pub(super) bytes_per_anchor: usize,
+    pub(super) font: FontArc,
+    pub(super) replacement_width: f32,
+    pub(super) scale: f32,
+    pub(super) migrate_batch_size: usize,
 }
 impl LineMapper {
     pub const REPLACEMENT_CHAR: char = char::REPLACEMENT_CHARACTER;
@@ -157,7 +157,7 @@ impl LineMapper {
     fn create_segment(&self, mut offset: i64, mut data: &[u8]) -> MappedSegment {
         // Try our best to align the beginning and end of the segment to UTF-8 boundaries
         // Always works for valid UTF-8
-        for i in 0..3.min(data.len()) {
+        for _ in 0..3.min(data.len()) {
             if is_utf8_cont(data[0]) {
                 offset += 1;
                 data = &data[1..];
@@ -187,22 +187,12 @@ impl LineMapper {
         let mut cur_x = 0.;
         let mut abs_x = offset == 0;
         while i < data.len() {
-            let c = decode_utf8(&data[i..]);
+            let (c, adv) = decode_utf8(&data[i..]);
             let place_anchor = anchor_acc >= self.bytes_per_anchor;
             let c_i = i;
-            let c = match c {
-                None => {
-                    // not a valid UTF-8 character
-                    i += 1;
-                    anchor_acc += 1;
-                    None
-                }
-                Some((c, adv)) => {
-                    i += adv;
-                    anchor_acc += adv;
-                    Some(c)
-                }
-            };
+            i += adv;
+            anchor_acc += adv;
+
             if place_anchor {
                 anchor_acc -= self.bytes_per_anchor;
                 seg.anchors.push_back(Anchor {
@@ -219,15 +209,15 @@ impl LineMapper {
                 }
             }
             match c {
-                None => {
+                Err(_) => {
                     cur_x += self.replacement_width as f64;
                 }
-                Some('\n') => {
+                Ok('\n') => {
                     cur_x = 0.;
                     cur_y += 1;
                     abs_x = true;
                 }
-                Some(c) => {
+                Ok(c) => {
                     let glyph = self.font.glyph_id(c);
                     cur_x += (self.font.h_advance_unscaled(glyph) * self.scale) as f64;
                 }
@@ -253,7 +243,8 @@ impl LineMapper {
     /// Merge two exactly adjacent segments.
     fn merge_segments(&self, linemap: LineMapHandle, l_idx: usize) {
         lock_linemap!(linemap, lmap_store, lmap);
-        let into_left = lmap.segments[l_idx].anchors.len() < lmap.segments[l_idx + 1].anchors.len();
+        let into_left =
+            lmap.segments[l_idx].anchors.len() >= lmap.segments[l_idx + 1].anchors.len();
         fn get_two(lmap: &mut LineMap, l: usize) -> (&mut MappedSegment, &mut MappedSegment) {
             let (a, b) = lmap.segments.split_at_mut(l + 1);
             (&mut a[l], &mut b[0])
@@ -305,7 +296,7 @@ impl LineMapper {
                 // Map the absolute index from the right segment to the left segment
                 let og_src_first_absolute = rsrc.first_absolute;
                 if ldst.first_absolute >= og_ldst_len {
-                    ldst.first_absolute = og_ldst_len - 1 + rsrc.first_absolute.min(batch_size);
+                    ldst.first_absolute = og_ldst_len - 1 + rsrc.first_absolute.min(batch_size + 1);
                 }
                 rsrc.first_absolute = rsrc.first_absolute.saturating_sub(batch_size);
                 for i in 0..batch_size + 1 {
@@ -356,16 +347,20 @@ impl LineMapper {
                 // Remove the end anchor of the left segment because it is redundant with
                 // the start anchor of the right segment
                 let og_lsrc_len = lsrc.anchors.len();
-                lsrc.anchors.pop_back();
+                let src_cap_anchor = lsrc.anchors.pop_back().unwrap();
                 // Get the anchor that will be the end of the left segment/start of the right segment
                 let src_end_idx = lsrc.anchors.len() - batch_size;
                 let src_end_anchor = lsrc.anchors[src_end_idx];
-                let end_y = src_end_anchor.y(lsrc.base_y);
-                let end_x =
-                    src_end_anchor.x(lsrc.base_x_relative, src_end_idx >= lsrc.first_absolute);
+                // Shift the right segment by the width/height that we are migrating
+                let shift_y = src_cap_anchor.y_offset - src_end_anchor.y_offset;
+                let shift_x = if lsrc.first_absolute >= og_lsrc_len {
+                    src_cap_anchor.x_offset - src_end_anchor.x_offset
+                } else {
+                    0.
+                };
                 // Map the absolute index from the left segment to the right segment
                 let og_lsrc_first_absolute = lsrc.first_absolute;
-                let og_dst_first_absolute = rdst.first_absolute;
+                let og_rdst_first_absolute = rdst.first_absolute;
                 rdst.first_absolute += batch_size;
                 if lsrc.first_absolute < og_lsrc_len {
                     rdst.first_absolute = rdst
@@ -374,10 +369,11 @@ impl LineMapper {
                 }
                 lsrc.first_absolute = lsrc.first_absolute.min(src_end_idx);
                 // Shift all Y coordinates in the right segment by the end Y of the left segment
-                rdst.base_y += end_y;
+                rdst.base_y += shift_y;
                 // Shift all relative X coordinates in the right segment by the end of the left segment
-                rdst.base_x_relative += end_x;
+                rdst.base_x_relative += shift_x;
                 for i in (0..batch_size).rev() {
+                    let a_i = lsrc.anchors.len() - 1;
                     let mut a = *lsrc.anchors.back().unwrap();
                     if i != 0 {
                         // Do not remove the last anchor, because it is both the end anchor
@@ -386,31 +382,15 @@ impl LineMapper {
                         lsrc.anchors.pop_back();
                     }
                     // Convert between coordinate bases
-                    a.y_offset = a.y_offset + (lsrc.base_y - rdst.base_y);
-                    let src_abs = og_lsrc_len - batch_size + i >= og_lsrc_first_absolute;
-                    let dst_abs = i >= og_dst_first_absolute;
-                    match (src_abs, dst_abs) {
-                        (false, false) => {
+                    let src_abs = og_lsrc_len - 1 - batch_size + i >= og_lsrc_first_absolute;
+                    match src_abs {
+                        false => {
                             // Convert between bases
                             a.x_offset = a.x_offset + (lsrc.base_x_relative - rdst.base_x_relative);
                         }
-                        (true, true) => {} // No conversion
-                        (true, false) => {
-                            // When the left segment knows that an anchor is absolute but
-                            // the right segment does not, we must adjust *all* right
-                            // segment anchors to be absolute
-                            // This could potentially involve updating the entire segment,
-                            // so it must be done beforehand in order to bump the mutex
-                            // regularly
-                            // Because it was done beforehand, this case never happens
-                        }
-                        (false, true) => {
-                            // Should never happen, because there is no way
-                            // for the right segment to know this anchor is absolute
-                            // without the left segment knowing it first
-                            unreachable!();
-                        }
+                        true => {} // No conversion
                     }
+                    a.y_offset = a.y_offset + (lsrc.base_y - rdst.base_y);
                     rdst.anchors.push_front(a);
                 }
                 // Keep the end and start offsets in sync with the endpoint anchors
@@ -424,16 +404,20 @@ impl LineMapper {
             lock_linemap!(linemap, lmap_store, lmap => bump);
         }
         // Finally, remove the empty source segment
-        lmap.segments
-            .remove(if into_left { l_idx } else { l_idx + 1 });
+        lmap.segments.remove(l_idx + if into_left { 1 } else { 0 });
     }
 
     fn insert_segment(&self, linemap: LineMapHandle, seg: MappedSegment) {
+        if seg.start == seg.end {
+            return;
+        }
         // check if this segment merges into a segment to the left
         lock_linemap!(linemap, lmap_store, lmap);
         let mut i = lmap.find_before(seg.start);
         let mut merge_left = false;
-        if let Some(s) = lmap.segments.get_mut(i) {
+        if i == lmap.segments.len() {
+            i = 0;
+        } else if let Some(s) = lmap.segments.get_mut(i) {
             if s.end >= seg.start {
                 // merge with this segment
                 assert!(
@@ -445,7 +429,7 @@ impl LineMapper {
             i += 1;
         }
         // check if this segment merges with a following segment
-        let mut j = lmap.find_after(seg.end as i64);
+        let j = lmap.find_after(seg.end as i64);
         let mut merge_right = false;
         if let Some(s) = lmap.segments.get_mut(j) {
             if s.start <= seg.end {
@@ -463,6 +447,7 @@ impl LineMapper {
         drop(lmap_store);
         if merge_left {
             self.merge_segments(linemap, i - 1);
+            i -= 1;
         }
         if merge_right {
             self.merge_segments(linemap, i);
@@ -639,33 +624,31 @@ impl LineMapper {
             l = offset;
             if let Some(s) = lmap.segments.get(i) {
                 if s.start <= offset {
-                    data = &data[(s.end - offset).min(data.len() as i64) as usize..];
-                    l = s.end;
+                    l = s.end.min(end);
+                    data = &data[(l - offset) as usize..];
                     i += 1;
                 }
             }
         }
         loop {
             // we have a hole from `l` to `r`
-            let r = {
+            let (r, next_l) = {
                 lock_linemap!(linemap, lmap);
                 lmap.segments
                     .get(i)
-                    .map(|s| s.start)
-                    .unwrap_or(end)
-                    .min(end)
+                    .map(|s| (s.start.min(end), s.end.min(end)))
+                    .unwrap_or((end, end))
             };
             // process data first without locking the linemap
-            let seg = self.create_segment(offset, &data[..(r - l) as usize]);
+            let seg = self.create_segment(l, &data[..(r - l) as usize]);
             // insert the data into the linemap
             self.insert_segment(linemap, seg);
             // advance to the next hole
             if r >= end {
                 break;
             } else {
-                lock_linemap!(linemap, lmap);
-                data = &data[(lmap.segments[i].end - offset).min(data.len() as i64) as usize..];
-                l = lmap.segments[i].end;
+                data = &data[(next_l - l) as usize..];
+                l = next_l;
                 i += 1;
             }
         }
@@ -678,25 +661,25 @@ pub struct MappedSegment {
     /// This information is redundant with the offset of the first anchor.
     /// If the start is `0`, Y coordinates are relative to the start of the
     /// file, so they can be considered absolute.
-    start: i64,
+    pub(super) start: i64,
     /// Exclusive end of this segment in absolute bytes.
     /// This information is redundant with the offset of the last anchor.
-    end: i64,
+    pub(super) end: i64,
     /// The index of the first anchor that has an absolute X coordinate.
     /// If there are no absolute anchors, it is the amount of anchors.
-    first_absolute: usize,
+    pub(super) first_absolute: usize,
     /// Base line number.
     /// The coordinates in anchors must be added with this value to have any meaning.
     /// This allows to shift the X coordinate of the entire segment quickly.
-    base_y: i64,
+    pub(super) base_y: i64,
     /// Base X coordinate, only for **relative** X coordinates.
     /// The X coordinate is special in that absolute X coordinates do not use a base.
     /// The coordinates in relative-X anchors must be added with this value to have any meaning.
     /// This allows to shift the X coordinate of the entire relative prefix of a segment quickly.
-    base_x_relative: f64,
+    pub(super) base_x_relative: f64,
     /// A set of anchor points, representing known reference points with X and Y coordinates.
     /// There is always an anchor at the start of the segment and at the end of the segment.
-    anchors: VecDeque<Anchor>,
+    pub(super) anchors: VecDeque<Anchor>,
 }
 impl MappedSegment {
     /// Create an invalid segment, to act as a discardable placeholder.
@@ -797,14 +780,14 @@ fn utf8_seq_len(b: u8) -> usize {
 
 /// Decode a single UTF-8 character from the given non-empty byte slice.
 /// Returns the length of the character.
-fn decode_utf8(b: &[u8]) -> Option<(char, usize)> {
+pub fn decode_utf8(b: &[u8]) -> (Result<char, u8>, usize) {
     let len = utf8_seq_len(b[0]);
     if b.len() < len {
-        return None;
+        return (Err(b[0]), 1);
     }
     match std::str::from_utf8(&b[..len]) {
-        Ok(s) => s.chars().next().map(|c| (c, len)),
-        Err(_err) => None,
+        Ok(s) => (Ok(s.chars().next().unwrap()), len),
+        Err(_err) => (Err(b[0]), 1),
     }
 }
 

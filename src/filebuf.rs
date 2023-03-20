@@ -7,6 +7,9 @@ use self::linemap::LineMapper;
 mod linemap;
 mod sparse;
 
+#[cfg(test)]
+mod test;
+
 /*
 /// Indicates that the `line`th line (0-based) starts at file offset `offset`.
 #[derive(Clone, Copy)]
@@ -148,7 +151,7 @@ impl FileManager {
                         // load either just before or just after the loaded segment
                         let lside = loaded.data[i].offset;
                         let rside = loaded.data[i].offset + loaded.data[i].data.len() as i64;
-                        if hot_offset - lside < rside - hot_offset {
+                        if hot_offset - lside < rside - hot_offset && lside > 0 {
                             // load left side
                             (
                                 loaded
@@ -205,12 +208,14 @@ impl FileManager {
         (&self.file).read_exact(&mut read_buf)?;
         self.linemapper
             .process_data(&self.shared.loaded, offset, &read_buf);
-        let mut loaded = self.shared.loaded.lock();
-        loaded.data.insert_segment(offset, read_buf);
+        SparseData::insert_data(&self.shared.loaded, offset, read_buf);
 
-        eprintln!("loaded segment [{}, {})", offset, offset + len as i64);
-        eprintln!("new sparse segments: {:?}", loaded.data);
-        eprintln!("new linemap segments: {:?}", loaded.linemap);
+        if false {
+            let loaded = self.shared.loaded.lock();
+            eprintln!("loaded segment [{}, {})", offset, offset + len as i64);
+            eprintln!("new sparse segments: {:?}", loaded.data);
+            eprintln!("new linemap segments: {:?}", loaded.linemap);
+        }
         Ok(())
     }
 }

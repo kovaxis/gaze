@@ -27,6 +27,7 @@ mod prelude {
         io::{self, Read, Seek, Write},
         mem, ops,
         path::{Path, PathBuf},
+        ptr,
         result::Result as StdResult,
         sync::Arc,
         thread::{self, JoinHandle},
