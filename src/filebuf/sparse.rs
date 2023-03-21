@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-use super::LoadedData;
+use super::{LoadedData, LoadedDataGuard};
 
 #[derive(Debug)]
 pub struct SparseSegment {
@@ -11,26 +11,26 @@ pub struct SparseSegment {
 pub type SparseHandle<'a> = &'a Mutex<LoadedData>;
 macro_rules! lock_sparse {
     ($handle:expr, $ref:ident) => {
-        let mut $ref = $handle.lock();
+        let mut $ref = LoadedDataGuard::lock($handle);
         #[allow(unused_mut)]
-        let mut $ref = &mut $ref.data;
+        let mut $ref = &mut $ref.guard.data;
     };
     ($handle:expr, $lock:ident, $ref:ident) => {
-        let mut $lock = $handle.lock();
+        let mut $lock = LoadedDataGuard::lock($handle);
         #[allow(unused_mut)]
-        let mut $ref = &mut $lock.data;
+        let mut $ref = &mut $lock.guard.data;
     };
     ($handle:expr, $lock:ident, $ref:ident => unlocked $code:block) => {{
         drop($ref);
         drop($lock);
         $code
-        $lock = $handle.lock();
-        $ref = &mut $lock.data;
+        $lock = LoadedDataGuard::lock($handle);
+        $ref = &mut $lock.guard.data;
     }};
     ($handle:expr, $lock:ident, $ref:ident => bump) => {{
         drop($ref);
-        MutexGuard::bump(&mut $lock);
-        $ref = &mut $lock.data;
+        $lock.bump();
+        $ref = &mut $lock.guard.data;
     }};
 }
 

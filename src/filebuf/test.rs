@@ -103,21 +103,17 @@ fn test_in_order(
     println!("{:?}", t.loaded.lock().linemap);
     let mut x = 0.;
     let mut y = 0;
-    let ih = t.font.height_unscaled().recip();
     let mut idx = 0;
     while idx < data.len() {
         let (c, adv) = decode_utf8(&data[idx..]);
         idx += adv;
-        match c {
-            Err(_) => {
-                x += t.linemapper.replacement_width as f64;
-            }
-            Ok('\n') => {
+        match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
+            '\n' => {
                 x = 0.;
                 y += 1;
             }
-            Ok(c) => {
-                x += (t.font.h_advance_unscaled(t.font.glyph_id(c)) * ih) as f64;
+            c => {
+                x += t.linemapper.advance_for(c);
             }
         }
     }

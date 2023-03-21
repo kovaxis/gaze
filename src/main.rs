@@ -22,6 +22,7 @@ mod prelude {
     pub use parking_lot::{Mutex, MutexGuard};
     pub use serde::{Deserialize, Serialize};
     pub use std::{
+        cell::Cell,
         fmt,
         fs::{self, File},
         io::{self, Read, Seek, Write},

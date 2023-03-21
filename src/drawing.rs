@@ -74,20 +74,19 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
         );
 
     let prelock = Instant::now();
-    let mut prefile = Instant::now();
+    let mut prefile = None;
 
     if let Some(file) = state.file.as_ref() {
-        // TODO: Line numbers
+        // TODO: Scissor text
         let mut linenum_buf = String::new();
         file.iter_lines(
             state.scroll.base_offset,
             min_draw,
             max_draw,
-            |dx, dy, rawtext| {
-                prefile = Instant::now();
+            |dx, dy, text| {
+                prefile.get_or_insert_with(Instant::now);
 
                 // Draw the visible window of this line
-                let text = String::from_utf8_lossy(rawtext);
                 let pos =
                     dvec2(dx - min_draw.x, dy as f64 - min_draw.y).as_vec2() * state.k.font_height;
                 state.draw.glyph.queue(
@@ -123,6 +122,7 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
         );
         file.set_hot_pos(&mut state.scroll);
     }
+    let prefile = prefile.unwrap_or_else(Instant::now);
 
     let preuploadtex = Instant::now();
 

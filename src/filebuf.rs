@@ -1,6 +1,10 @@
 use glyph_brush::ab_glyph::FontArc;
 
-use crate::{filebuf::linemap::LineMap, filebuf::sparse::SparseData, prelude::*};
+use crate::{
+    filebuf::linemap::LineMap,
+    filebuf::{linemap::decode_utf8, sparse::SparseData},
+    prelude::*,
+};
 
 use self::linemap::LineMapper;
 
@@ -118,19 +122,18 @@ struct Shared {
     lineloading: AtomicCell<bool>,
     hot_offset: AtomicCell<i64>,
     loaded: Mutex<LoadedData>,
+    linemapper: LineMapper,
 }
 
 struct FileManager {
     shared: Arc<Shared>,
     file: File,
-    linemapper: LineMapper,
     read_size: usize,
     load_radius: i64,
 }
 impl FileManager {
-    fn new(shared: Arc<Shared>, file: File, max_memory: usize, font: FontArc) -> Self {
+    fn new(shared: Arc<Shared>, file: File) -> Self {
         Self {
-            linemapper: LineMapper::new(font, max_memory, shared.file_size),
             file,
             shared,
             read_size: 64 * 1024,
@@ -142,10 +145,11 @@ impl FileManager {
         while !self.shared.stop.load() {
             let hot_offset = self.shared.hot_offset.load();
             let (l, r) = {
-                let mut loaded = self.shared.loaded.lock();
+                let loaded = self.shared.loaded.lock();
+                let start = Instant::now();
                 // load data around the hot offset
                 let read_size = self.read_size as i64;
-                match loaded.data.find_segment(hot_offset) {
+                let lr = match loaded.data.find_segment(hot_offset) {
                     Ok(i) => {
                         // the hot offset itself is already loaded
                         // load either just before or just after the loaded segment
@@ -189,7 +193,19 @@ impl FileManager {
                             .unwrap_or(self.shared.file_size)
                             .min(hot_offset + read_size / 2),
                     ),
+                };
+                let segn = loaded.data.segments.len();
+                drop(loaded);
+
+                let lockt = start.elapsed();
+                if lockt > Duration::from_millis(10) {
+                    eprintln!(
+                        "took {}ms to find segment to load within {} segments",
+                        lockt.as_secs_f64() * 1000.,
+                        segn,
+                    );
                 }
+                lr
             };
             // Load the found segment
             if l < r {
@@ -206,7 +222,8 @@ impl FileManager {
         let mut read_buf = vec![0; len];
         (&self.file).seek(io::SeekFrom::Start(offset as u64))?;
         (&self.file).read_exact(&mut read_buf)?;
-        self.linemapper
+        self.shared
+            .linemapper
             .process_data(&self.shared.loaded, offset, &read_buf);
         SparseData::insert_data(&self.shared.loaded, offset, read_buf);
 
@@ -223,6 +240,7 @@ impl FileManager {
 pub struct FileBuffer {
     manager: JoinHandle<Result<()>>,
     shared: Arc<Shared>,
+    textbuf: Cell<String>,
 }
 impl Drop for FileBuffer {
     fn drop(&mut self) {
@@ -243,28 +261,32 @@ impl FileBuffer {
             .context("failed to determine length of file")?
             .try_into()
             .context("file too large")?;
-        let file2 = File::open(path).context("failed to reopen file for parallel lineloading")?;
+        let max_linemap_memory = 1024 * 1024;
         let shared = Arc::new(Shared {
             file_size,
             stop: false.into(),
             lineloading: true.into(),
             hot_offset: 0.into(),
+            linemapper: LineMapper::new(font, max_linemap_memory, file_size),
             loaded: LoadedData {
                 data: SparseData::new(file_size),
                 linemap: LineMap::new(),
             }
             .into(),
         });
-        let max_linemap_memory = 1024 * 1024;
         let manager = {
             let shared = shared.clone();
             thread::spawn(move || {
-                FileManager::new(shared, file, max_linemap_memory, font).run()?;
+                FileManager::new(shared, file).run()?;
                 eprintln!("manager thread finishing");
                 Ok(())
             })
         };
-        Ok(Self { manager, shared })
+        Ok(Self {
+            manager,
+            shared,
+            textbuf: default(),
+        })
     }
 
     pub fn iter_lines(
@@ -272,8 +294,9 @@ impl FileBuffer {
         base_offset: i64,
         min: DVec2,
         max: DVec2,
-        mut f: impl FnMut(f64, i64, &[u8]),
+        mut f: impl FnMut(f64, i64, &str),
     ) {
+        let mut textbuf = self.textbuf.take();
         let loaded = self.shared.loaded.lock();
         let y0 = min.y.floor() as i64;
         let y1 = max.y.ceil() as i64;
@@ -283,21 +306,53 @@ impl FileBuffer {
                     .linemap
                     .scanline_to_anchors(base_offset, y, (min.x, max.x))
             {
-                let linedata = loaded.data.longest_prefix(lo.offset, hi.offset);
+                let mut linedata = loaded.data.longest_prefix(lo.offset, hi.offset);
                 // NOTE: This subtraction makes no sense if one is relative and the other is absolute
-                let dx = lo.x_offset - base.x_offset;
+                let mut dx = lo.x_offset - base.x_offset;
                 let mut dy = lo.y_offset - base.y_offset;
-                eprintln!(
-                    "drawing line at y = {}, with dy = {}, dx = {}, and {} bytes",
-                    y,
-                    dy,
-                    dx,
-                    linedata.len()
-                );
-                // TODO: Strip the trailing characters from previous lines
-                f(dx, dy, linedata);
+                // Remove excess data at the beggining of the line
+                while !linedata.is_empty() && (dy < y || dy == y && dx < min.x) {
+                    let (c, adv) = decode_utf8(linedata);
+                    match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
+                        '\n' => {
+                            if dy == y {
+                                break;
+                            }
+                            dy += 1;
+                            dx = 0.;
+                        }
+                        c => {
+                            let hadv = self.shared.linemapper.advance_for(c);
+                            if dy == y && dx + hadv > min.x {
+                                break;
+                            }
+                            dx += hadv;
+                        }
+                    }
+                    linedata = &linedata[adv..];
+                }
+                // Take readable text
+                textbuf.clear();
+                {
+                    let mut dx_end = dx;
+                    while !linedata.is_empty() && dx_end < max.x {
+                        let (c, adv) = decode_utf8(linedata);
+                        match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
+                            '\n' => {
+                                break;
+                            }
+                            c => {
+                                textbuf.push(c);
+                                dx_end += self.shared.linemapper.advance_for(c);
+                            }
+                        }
+                        linedata = &linedata[adv..];
+                    }
+                }
+                f(dx, dy, &textbuf);
             }
         }
+        self.textbuf.replace(textbuf);
     }
 
     pub fn set_hot_pos(&self, pos: &mut ScrollPos) {
@@ -332,4 +387,40 @@ pub struct ScrollPos {
     pub delta_x: f64,
     /// A difference in visual Y position from the base offset, as a fractional number of lines.
     pub delta_y: f64,
+}
+
+type LoadedDataHandle<'a> = &'a Mutex<LoadedData>;
+
+struct LoadedDataGuard<'a> {
+    start: Instant,
+    guard: MutexGuard<'a, LoadedData>,
+}
+impl Drop for LoadedDataGuard<'_> {
+    fn drop(&mut self) {
+        self.check_time();
+    }
+}
+impl LoadedDataGuard<'_> {
+    fn lock(handle: LoadedDataHandle) -> LoadedDataGuard {
+        LoadedDataGuard {
+            guard: handle.lock(),
+            start: Instant::now(),
+        }
+    }
+
+    fn bump(&mut self) {
+        self.check_time();
+        MutexGuard::bump(&mut self.guard);
+        self.start = Instant::now();
+    }
+
+    fn check_time(&self) {
+        let t = self.start.elapsed();
+        if t > Duration::from_millis(5) {
+            eprintln!(
+                "operation locked common data for {}ms",
+                t.as_secs_f64() * 1000.
+            );
+        }
+    }
 }
