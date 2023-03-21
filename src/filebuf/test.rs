@@ -20,6 +20,7 @@ fn init(fsize: i64, max_mem: usize) -> TestInst {
         loaded: Mutex::new(LoadedData {
             linemap: LineMap::new(),
             data: SparseData::new(),
+            hot_offset: 0,
         }),
         linemapper: LineMapper::new(font, max_mem, fsize),
     }

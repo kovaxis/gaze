@@ -4,7 +4,7 @@ use glyph_brush::ab_glyph::{Font, FontArc};
 
 use crate::prelude::*;
 
-use super::{LoadedData, LoadedDataGuard};
+use super::{LoadedData, LoadedDataGuard, ScrollPos};
 
 /// There are two diferent "coordinate systems" in a text file:
 /// - Raw byte offset
@@ -60,6 +60,13 @@ impl LineMap {
         self.segments.len()
     }
 
+    /// Find the segment that contains the given offset, if any.
+    fn find_segment(&self, offset: i64) -> Option<&MappedSegment> {
+        self.segments
+            .get(self.find_after(offset))
+            .filter(|s| s.start <= offset)
+    }
+
     /// Maps the given base offset and a delta range to a pair of anchors that contain the scanline.
     /// Note that these anchors might have Y coordinates different to `dy`.
     /// Returns as a third value the reference anchor, against which the `dy` and `dx` values were
@@ -70,29 +77,27 @@ impl LineMap {
         dy: i64,
         dx: (f64, f64),
     ) -> Option<[Anchor; 3]> {
-        let i = self.find_after(base_offset);
-        if let Some(s) = self.segments.get(i) {
-            if s.start <= base_offset {
-                // The base offset is contained within a loaded segment
-                let base = s.find_lower(base_offset)?;
-                let is_x_abs = s.is_x_absolute(base);
-                if !is_x_abs && dy != 0 {
-                    // When we use a non-absolute base, it means we haven't loaded before
-                    // the start of the current line.
-                    // Additionally, we don't know the relationship between the X coordinates
-                    // of following lines and the base line, therefore if we draw the following
-                    // lines it would involve a large amount of dizzy moving text
-                    return None;
-                }
-                let y = base.y(s.base_y) + dy;
-                let x0 = base.x(s.base_x_relative, is_x_abs) + dx.0;
-                let x1 = base.x(s.base_x_relative, is_x_abs) + dx.1;
-                let lo = s.locate_lower(y, x0.max(0.))?;
-                let hi = s.locate_upper(y, x1.max(0.))?;
-                return Some([lo, hi, base]);
-            }
+        let (s, base) = self.offset_to_base(base_offset)?;
+        let is_x_abs = s.is_x_absolute(base);
+        if !is_x_abs && dy != 0 {
+            // When we use a non-absolute base, it means we haven't loaded before
+            // the start of the current line.
+            // Additionally, we don't know the relationship between the X coordinates
+            // of following lines and the base line, therefore if we draw the following
+            // lines it would involve a large amount of dizzy moving text
+            return None;
         }
-        None
+        let y = base.y(s.base_y) + dy;
+        let x0 = base.x(s.base_x_relative, is_x_abs) + dx.0;
+        let x1 = base.x(s.base_x_relative, is_x_abs) + dx.1;
+        let lo = s.locate_lower(y, x0.max(0.))?;
+        let hi = s.locate_upper(y, x1.max(0.))?;
+        Some([lo, hi, base])
+    }
+
+    fn offset_to_base(&self, base_offset: i64) -> Option<(&MappedSegment, Anchor)> {
+        self.find_segment(base_offset)
+            .and_then(|s| s.find_lower(base_offset).map(|a| (s, a)))
     }
 }
 impl fmt::Debug for LineMap {
@@ -274,6 +279,9 @@ impl LineMapper {
                 }
             }
         }
+        // TODO: Make sure we don't stall while growing the anchor `VecDeque`
+        // In cases where a large grow needs to be done, this entails allocating a separate clone
+        // and slowly copying the data over while regularly bumping the mutex
         loop {
             if into_left {
                 // Move anchors from the right segment to the left segment
@@ -491,6 +499,27 @@ impl LineMapper {
                 data = &data[(next_l - l) as usize..];
                 l = next_l;
                 i += 1;
+            }
+        }
+    }
+
+    pub fn clamp_pos(&self, lmap: &LineMap, pos: &mut ScrollPos) {
+        match lmap.offset_to_base(pos.base_offset) {
+            Some((s, base)) => {
+                // Confine to the limits of loaded data
+                // TODO: Clamp to maximum length of any line
+                // This requires keeping track of the maximum width of each segment
+                let y = base.y(s.base_y) as f64;
+                let x = base.x(s.base_x_relative, s.is_x_absolute(base));
+                let end = *s.anchors.back().unwrap();
+                let end_y = end.y(s.base_y) as f64 - y;
+                pos.delta_y = pos.delta_y.clamp(-y, end_y);
+                pos.delta_x = pos.delta_x.max(-x);
+            }
+            None => {
+                // Cannot scroll if the data is not yet loaded
+                pos.delta_x = 0.;
+                pos.delta_y = 0.;
             }
         }
     }

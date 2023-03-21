@@ -66,62 +66,55 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
     }
     let (w, h) = frame.get_dimensions();
 
-    let min_draw = dvec2(state.scroll.delta_x, state.scroll.delta_y);
-    let max_draw = min_draw
-        + dvec2(
-            (w as f64 - state.k.left_bar as f64) / state.k.font_height as f64,
-            h as f64 / state.k.font_height as f64,
-        );
+    let text_view = dvec2(
+        (w as f64 - state.k.left_bar as f64) / state.k.font_height as f64,
+        h as f64 / state.k.font_height as f64,
+    );
 
     let prefile = Instant::now();
     let mut textqueue = Duration::ZERO;
-    if let Some(file) = state.file.as_ref() {
+    if let Some(mut file) = state.file.as_ref().map(|f| f.lock()) {
+        file.clamp_scroll(&mut state.scroll);
         // TODO: Scissor text
         let mut linenum_buf = String::new();
-        file.iter_lines(
-            state.scroll.base_offset,
-            min_draw,
-            max_draw,
-            |dx, dy, text| {
-                let inner_start = Instant::now();
+        file.iter_lines(&state.scroll, text_view, |dx, dy, text| {
+            let inner_start = Instant::now();
 
-                // Draw the visible window of this line
-                let pos =
-                    dvec2(dx - min_draw.x, dy as f64 - min_draw.y).as_vec2() * state.k.font_height;
-                state.draw.glyph.queue(
-                    Section::new()
-                        .add_text(
-                            Text::new(&text)
-                                .with_scale(state.k.font_height)
-                                .with_color(state.k.text_color),
-                        )
-                        .with_screen_position((state.k.left_bar + pos.x, pos.y))
-                        .with_layout(Layout::default()),
-                );
+            // Draw the visible window of this line
+            let pos = dvec2(dx - state.scroll.delta_x, dy as f64 - state.scroll.delta_y).as_vec2()
+                * state.k.font_height;
+            state.draw.glyph.queue(
+                Section::new()
+                    .add_text(
+                        Text::new(&text)
+                            .with_scale(state.k.font_height)
+                            .with_color(state.k.text_color),
+                    )
+                    .with_screen_position((state.k.left_bar + pos.x, pos.y))
+                    .with_layout(Layout::default()),
+            );
 
-                // Draw the line number
-                linenum_buf.clear();
-                {
-                    use std::fmt::Write;
-                    let _ = write!(linenum_buf, "{}", dy + 1);
-                }
-                let linenum_x = state.k.left_bar - state.k.linenum_pad;
-                state.draw.glyph.queue(
-                    Section::new()
-                        .add_text(
-                            Text::new(&linenum_buf)
-                                .with_scale(state.k.font_height)
-                                .with_color(state.k.linenum_color),
-                        )
-                        .with_screen_position((linenum_x, pos.y))
-                        .with_bounds((linenum_x, h as f32 - pos.y))
-                        .with_layout(Layout::default_single_line().h_align(HorizontalAlign::Right)),
-                );
+            // Draw the line number
+            linenum_buf.clear();
+            {
+                use std::fmt::Write;
+                let _ = write!(linenum_buf, "{}", dy + 1);
+            }
+            let linenum_x = state.k.left_bar - state.k.linenum_pad;
+            state.draw.glyph.queue(
+                Section::new()
+                    .add_text(
+                        Text::new(&linenum_buf)
+                            .with_scale(state.k.font_height)
+                            .with_color(state.k.linenum_color),
+                    )
+                    .with_screen_position((linenum_x, pos.y))
+                    .with_bounds((linenum_x, h as f32 - pos.y))
+                    .with_layout(Layout::default_single_line().h_align(HorizontalAlign::Right)),
+            );
 
-                textqueue += inner_start.elapsed();
-            },
-        );
-        file.set_hot_pos(&mut state.scroll);
+            textqueue += inner_start.elapsed();
+        });
     }
 
     let preuploadtex = Instant::now();

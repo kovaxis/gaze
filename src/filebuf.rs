@@ -114,12 +114,12 @@ impl<'a> Iterator for LineMappingIter<'a> {
 pub struct LoadedData {
     pub linemap: LineMap,
     pub data: SparseData,
+    pub hot_offset: i64,
 }
 
 struct Shared {
     file_size: i64,
     stop: AtomicCell<bool>,
-    hot_offset: AtomicCell<i64>,
     loaded: Mutex<LoadedData>,
     linemapper: LineMapper,
 }
@@ -142,11 +142,11 @@ impl FileManager {
 
     fn run(self) -> Result<()> {
         while !self.shared.stop.load() {
-            let hot_offset = self.shared.hot_offset.load();
             let (l, r) = {
                 let loaded = self.shared.loaded.lock();
                 let start = Instant::now();
                 // load data around the hot offset
+                let hot_offset = loaded.hot_offset;
                 let read_size = self.read_size as i64;
                 let lr = match loaded.data.find_segment(hot_offset) {
                     Ok(i) => {
@@ -264,11 +264,11 @@ impl FileBuffer {
         let shared = Arc::new(Shared {
             file_size,
             stop: false.into(),
-            hot_offset: 0.into(),
             linemapper: LineMapper::new(font, max_linemap_memory, file_size),
             loaded: LoadedData {
                 data: SparseData::new(),
                 linemap: LineMap::new(),
+                hot_offset: 0,
             }
             .into(),
         });
@@ -287,29 +287,58 @@ impl FileBuffer {
         })
     }
 
+    pub fn lock(&self) -> FileLock {
+        FileLock::new(self)
+    }
+
+    pub fn file_size(&self) -> i64 {
+        self.shared.file_size
+    }
+}
+
+/// Lock the data that is shared with the manager thread.
+/// The manager thread goes to
+pub struct FileLock<'a> {
+    pub filebuf: &'a FileBuffer,
+    loaded: MutexGuard<'a, LoadedData>,
+}
+impl FileLock<'_> {
+    fn new(buf: &FileBuffer) -> FileLock {
+        FileLock {
+            loaded: buf.shared.loaded.lock(),
+            filebuf: buf,
+        }
+    }
+
+    pub fn clamp_scroll(&mut self, scroll: &mut ScrollPos) {
+        self.filebuf
+            .shared
+            .linemapper
+            .clamp_pos(&self.loaded.linemap, scroll);
+    }
+
     pub fn iter_lines(
-        &self,
-        base_offset: i64,
-        min: DVec2,
-        max: DVec2,
+        &mut self,
+        pos: &ScrollPos,
+        view_size: DVec2,
         mut f: impl FnMut(f64, i64, &str),
     ) {
-        let mut textbuf = self.textbuf.take();
-        let loaded = self.shared.loaded.lock();
-        let y0 = min.y.floor() as i64;
-        let y1 = max.y.ceil() as i64;
+        let mut textbuf = self.filebuf.textbuf.take();
+        let loaded = &mut *self.loaded;
+        let y0 = pos.delta_y.floor() as i64;
+        let y1 = (pos.delta_y + view_size.y).ceil() as i64;
         for y in y0..y1 {
-            if let Some([lo, hi, base]) =
-                loaded
-                    .linemap
-                    .scanline_to_anchors(base_offset, y, (min.x, max.x))
-            {
+            if let Some([lo, hi, base]) = loaded.linemap.scanline_to_anchors(
+                pos.base_offset,
+                y,
+                (pos.delta_x, pos.delta_x + view_size.x),
+            ) {
                 let mut linedata = loaded.data.longest_prefix(lo.offset, hi.offset);
                 // NOTE: This subtraction makes no sense if one is relative and the other is absolute
                 let mut dx = lo.x_offset - base.x_offset;
                 let mut dy = lo.y_offset - base.y_offset;
                 // Remove excess data at the beggining of the line
-                while !linedata.is_empty() && (dy < y || dy == y && dx < min.x) {
+                while !linedata.is_empty() && (dy < y || dy == y && dx < pos.delta_x) {
                     let (c, adv) = decode_utf8(linedata);
                     match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
                         '\n' => {
@@ -320,8 +349,8 @@ impl FileBuffer {
                             dx = 0.;
                         }
                         c => {
-                            let hadv = self.shared.linemapper.advance_for(c);
-                            if dy == y && dx + hadv > min.x {
+                            let hadv = self.filebuf.shared.linemapper.advance_for(c);
+                            if dy == y && dx + hadv > pos.delta_x {
                                 break;
                             }
                             dx += hadv;
@@ -333,7 +362,7 @@ impl FileBuffer {
                 textbuf.clear();
                 {
                     let mut dx_end = dx;
-                    while !linedata.is_empty() && dx_end < max.x {
+                    while !linedata.is_empty() && dx_end < pos.delta_x + view_size.x {
                         let (c, adv) = decode_utf8(linedata);
                         match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
                             '\n' => {
@@ -341,7 +370,7 @@ impl FileBuffer {
                             }
                             c => {
                                 textbuf.push(c);
-                                dx_end += self.shared.linemapper.advance_for(c);
+                                dx_end += self.filebuf.shared.linemapper.advance_for(c);
                             }
                         }
                         linedata = &linedata[adv..];
@@ -350,18 +379,7 @@ impl FileBuffer {
                 f(dx, dy, &textbuf);
             }
         }
-        self.textbuf.replace(textbuf);
-    }
-
-    pub fn set_hot_pos(&self, pos: &mut ScrollPos) {
-        let old = self.shared.hot_offset.swap(pos.base_offset);
-        if pos.base_offset != old {
-            self.manager.thread().unpark();
-        }
-    }
-
-    pub fn file_size(&self) -> i64 {
-        self.shared.file_size
+        self.filebuf.textbuf.replace(textbuf);
     }
 }
 

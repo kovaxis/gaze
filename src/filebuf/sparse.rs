@@ -135,6 +135,9 @@ impl SparseData {
             (l.last_mut().unwrap(), r.first_mut().unwrap())
         }
         let into_left = sparse.segments[l_idx].data.len() >= sparse.segments[l_idx + 1].data.len();
+        // TODO: Make sure we don't stall while growing the data `Demem`
+        // In cases where a large grow needs to be done, this entails allocating a separate clone
+        // and slowly copying the data over while regularly bumping the mutex
         loop {
             let batch_size = sparse.merge_batch_size;
             let (l, r) = get_two(sparse, l_idx);
