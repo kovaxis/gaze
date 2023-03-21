@@ -119,7 +119,6 @@ pub struct LoadedData {
 struct Shared {
     file_size: i64,
     stop: AtomicCell<bool>,
-    lineloading: AtomicCell<bool>,
     hot_offset: AtomicCell<i64>,
     loaded: Mutex<LoadedData>,
     linemapper: LineMapper,
@@ -265,11 +264,10 @@ impl FileBuffer {
         let shared = Arc::new(Shared {
             file_size,
             stop: false.into(),
-            lineloading: true.into(),
             hot_offset: 0.into(),
             linemapper: LineMapper::new(font, max_linemap_memory, file_size),
             loaded: LoadedData {
-                data: SparseData::new(file_size),
+                data: SparseData::new(),
                 linemap: LineMap::new(),
             }
             .into(),

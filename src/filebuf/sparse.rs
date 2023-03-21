@@ -37,14 +37,12 @@ macro_rules! lock_sparse {
 /// Holds sparse segments of data loaded from a potentially huge file.
 pub struct SparseData {
     pub(super) segments: Vec<SparseSegment>,
-    pub(super) file_size: i64,
     pub(super) merge_batch_size: usize,
 }
 impl SparseData {
-    pub fn new(file_size: i64) -> Self {
+    pub fn new() -> Self {
         Self {
             segments: default(),
-            file_size,
             merge_batch_size: 4 * 1024,
         }
     }
@@ -88,7 +86,7 @@ impl SparseData {
     }
 
     /// Inserts the given data into the given offset.
-    fn insert_segment(&mut self, mut offset: i64, mut data: Vec<u8>) -> usize {
+    fn insert_segment(&mut self, offset: i64, data: Vec<u8>) -> usize {
         let mut i = self.find_before(offset);
         let mut j = self.find_after(offset + data.len() as i64);
 

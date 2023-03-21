@@ -523,18 +523,6 @@ pub struct MappedSegment {
     pub(super) anchors: VecDeque<Anchor>,
 }
 impl MappedSegment {
-    /// Create an invalid segment, to act as a discardable placeholder.
-    fn placeholder() -> Self {
-        Self {
-            start: 0,
-            end: 0,
-            base_y: 0,
-            base_x_relative: 0.,
-            first_absolute: 0,
-            anchors: VecDeque::new(),
-        }
-    }
-
     /// Check if the given anchor has an absolute X coordinate.
     fn is_x_absolute(&self, anchor: Anchor) -> bool {
         match self.anchors.get(self.first_absolute) {
@@ -552,7 +540,7 @@ impl MappedSegment {
     }
 
     /// Find the first anchor at or after the given offset.
-    fn find_upper(&self, offset: i64) -> Option<Anchor> {
+    fn _find_upper(&self, offset: i64) -> Option<Anchor> {
         self.anchors
             .get(self.anchors.partition_point(|a| a.offset < offset))
             .copied()
@@ -627,8 +615,8 @@ pub fn decode_utf8(b: &[u8]) -> (Result<char, u8>, usize) {
         return (Err(b[0]), 1);
     }
     match std::str::from_utf8(&b[..len]) {
-        Ok(s) => (Ok(s.chars().next().unwrap()), len),
-        Err(_err) => (Err(b[0]), 1),
+        Ok(s) if !s.is_empty() => (Ok(s.chars().next().unwrap()), len),
+        _ => (Err(b[0]), 1),
     }
 }
 
@@ -643,7 +631,7 @@ pub struct Anchor {
 }
 impl Anchor {
     /// Only correct for relative-X anchors.
-    pub fn x_rel(&self, base_x: f64) -> f64 {
+    pub fn _x_rel(&self, base_x: f64) -> f64 {
         self.x_offset + base_x
     }
 

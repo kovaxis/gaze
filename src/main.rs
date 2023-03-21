@@ -45,7 +45,6 @@ mod drawing;
 mod filebuf;
 
 pub struct WindowState {
-    font: FontArc,
     display: Display,
     draw: DrawState,
     file: Option<FileBuffer>,
@@ -94,7 +93,6 @@ fn main() -> Result<()> {
         focused: false,
         draw: DrawState::new(&display, &font)?,
         display,
-        font,
     };
 
     gl_run_loop(

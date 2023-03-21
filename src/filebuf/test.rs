@@ -10,7 +10,6 @@ use crate::{
 };
 
 struct TestInst {
-    font: FontArc,
     loaded: Mutex<LoadedData>,
     linemapper: LineMapper,
 }
@@ -18,16 +17,14 @@ struct TestInst {
 fn init(fsize: i64, max_mem: usize) -> TestInst {
     let font = FontArc::try_from_vec(fs::read("font.ttf").unwrap()).unwrap();
     TestInst {
-        font: font.clone(),
         loaded: Mutex::new(LoadedData {
             linemap: LineMap::new(),
-            data: SparseData::new(fsize),
+            data: SparseData::new(),
         }),
         linemapper: LineMapper::new(font, max_mem, fsize),
     }
 }
 
-use glyph_brush::ab_glyph::Font;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 
 type TestRng = rand_xoshiro::Xoshiro256StarStar;

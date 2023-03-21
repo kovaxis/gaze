@@ -73,9 +73,8 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
             h as f64 / state.k.font_height as f64,
         );
 
-    let prelock = Instant::now();
-    let mut prefile = None;
-
+    let prefile = Instant::now();
+    let mut textqueue = Duration::ZERO;
     if let Some(file) = state.file.as_ref() {
         // TODO: Scissor text
         let mut linenum_buf = String::new();
@@ -84,7 +83,7 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
             min_draw,
             max_draw,
             |dx, dy, text| {
-                prefile.get_or_insert_with(Instant::now);
+                let inner_start = Instant::now();
 
                 // Draw the visible window of this line
                 let pos =
@@ -118,11 +117,12 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
                         .with_bounds((linenum_x, h as f32 - pos.y))
                         .with_layout(Layout::default_single_line().h_align(HorizontalAlign::Right)),
                 );
+
+                textqueue += inner_start.elapsed();
             },
         );
         file.set_hot_pos(&mut state.scroll);
     }
-    let prefile = prefile.unwrap_or_else(Instant::now);
 
     let preuploadtex = Instant::now();
 
@@ -222,15 +222,17 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
     let finish = Instant::now();
     eprint!(
         "timings:
-    file lock: {:3}ms
-    text queueing: {:3}ms
+    frame init: {:3}ms
+    total file access: {:3}ms
+    total text queueing: {:3}ms
     texture upload: {:3}ms
     vertex upload: {:3}ms
     draw call: {:3}ms
     swap: {:3}ms
 ",
-        (prefile - prelock).as_secs_f64() * 1000.,
-        (preuploadtex - prefile).as_secs_f64() * 1000.,
+        (prefile - start).as_secs_f64() * 1000.,
+        (preuploadtex - prefile - textqueue).as_secs_f64() * 1000.,
+        textqueue.as_secs_f64() * 1000.,
         (preuploadvert - preuploadtex).as_secs_f64() * 1000.,
         (predraw - preuploadvert).as_secs_f64() * 1000.,
         (preswap - predraw).as_secs_f64() * 1000.,
