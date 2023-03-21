@@ -1,4 +1,4 @@
-use glyph_brush::ab_glyph::FontArc;
+use ab_glyph::FontArc;
 
 use crate::{
     filebuf::linemap::LineMap,
@@ -239,7 +239,6 @@ impl FileManager {
 pub struct FileBuffer {
     manager: JoinHandle<Result<()>>,
     shared: Arc<Shared>,
-    textbuf: Cell<String>,
 }
 impl Drop for FileBuffer {
     fn drop(&mut self) {
@@ -280,11 +279,7 @@ impl FileBuffer {
                 Ok(())
             })
         };
-        Ok(Self {
-            manager,
-            shared,
-            textbuf: default(),
-        })
+        Ok(Self { manager, shared })
     }
 
     pub fn lock(&self) -> FileLock {
@@ -293,6 +288,10 @@ impl FileBuffer {
 
     pub fn file_size(&self) -> i64 {
         self.shared.file_size
+    }
+
+    pub fn advance_for(&self, c: char) -> f64 {
+        self.shared.linemapper.advance_for(c)
     }
 }
 
@@ -321,9 +320,8 @@ impl FileLock<'_> {
         &mut self,
         pos: &ScrollPos,
         view_size: DVec2,
-        mut f: impl FnMut(f64, i64, &str),
+        mut on_char_or_line: impl FnMut(f64, i64, Option<char>),
     ) {
-        let mut textbuf = self.filebuf.textbuf.take();
         let loaded = &mut *self.loaded;
         let y0 = pos.delta_y.floor() as i64;
         let y1 = (pos.delta_y + view_size.y).ceil() as i64;
@@ -349,7 +347,7 @@ impl FileLock<'_> {
                             dx = 0.;
                         }
                         c => {
-                            let hadv = self.filebuf.shared.linemapper.advance_for(c);
+                            let hadv = self.filebuf.advance_for(c);
                             if dy == y && dx + hadv > pos.delta_x {
                                 break;
                             }
@@ -358,28 +356,23 @@ impl FileLock<'_> {
                     }
                     linedata = &linedata[adv..];
                 }
-                // Take readable text
-                textbuf.clear();
-                {
-                    let mut dx_end = dx;
-                    while !linedata.is_empty() && dx_end < pos.delta_x + view_size.x {
-                        let (c, adv) = decode_utf8(linedata);
-                        match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
-                            '\n' => {
-                                break;
-                            }
-                            c => {
-                                textbuf.push(c);
-                                dx_end += self.filebuf.shared.linemapper.advance_for(c);
-                            }
+                // Process readable text
+                on_char_or_line(dx, dy, None);
+                while !linedata.is_empty() && dx < pos.delta_x + view_size.x {
+                    let (c, adv) = decode_utf8(linedata);
+                    match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
+                        '\n' => {
+                            break;
                         }
-                        linedata = &linedata[adv..];
+                        c => {
+                            on_char_or_line(dx, dy, Some(c));
+                            dx += self.filebuf.advance_for(c);
+                        }
                     }
+                    linedata = &linedata[adv..];
                 }
-                f(dx, dy, &textbuf);
             }
         }
-        self.filebuf.textbuf.replace(textbuf);
     }
 }
 

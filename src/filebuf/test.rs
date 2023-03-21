@@ -1,5 +1,3 @@
-use glyph_brush::ab_glyph::FontArc;
-
 use crate::{
     filebuf::{
         linemap::{decode_utf8, LineMap, LineMapper},

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use glyph_brush::ab_glyph::{Font, FontArc};
+use ab_glyph::Font;
 
 use crate::prelude::*;
 

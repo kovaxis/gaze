@@ -7,10 +7,10 @@ use gl::{
     winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta},
     *,
 };
-use glyph_brush::ab_glyph::FontArc;
 
 mod prelude {
     pub(crate) use crate::filebuf::FileBuffer;
+    pub use ab_glyph::FontArc;
     pub use anyhow::{anyhow, bail, ensure, Context, Error, Result};
     pub use crossbeam_channel::{self as channel, Receiver, Sender};
     pub use crossbeam_utils::atomic::AtomicCell;
