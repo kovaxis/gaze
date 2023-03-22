@@ -25,7 +25,8 @@ pub struct LoadedData {
 impl LoadedData {
     /// Get the next logical range to load, based on the hot offset and the
     /// currently loaded data.
-    fn get_range_to_load(&self, max_len: i64) -> (i64, i64) {
+    /// May return invalid (negative) ranges if there is no more data to load.
+    fn get_range_to_load(&self, max_len: i64, load_radius: i64) -> (i64, i64) {
         let m = self.hot_offset;
         let lm = self.linemap.find_surroundings(m);
         let sd = self.data.find_surroundings(m);
@@ -35,9 +36,9 @@ impl LoadedData {
             (Err(lm), Ok(_)) => Err(lm),
             (Ok(_), Err(sd)) => Err(sd),
         };
-        match guide {
+        let (l, r) = match guide {
             Ok((l, r)) => {
-                if m - l < r - m {
+                if m - l < r - m && l > 0 || r >= self.linemap.file_size {
                     // Load left side
                     (l - max_len, l)
                 } else {
@@ -45,8 +46,25 @@ impl LoadedData {
                     (r, r + max_len)
                 }
             }
-            Err((l, r)) => (l.max(m - max_len / 2), r.min(m + max_len / 2)),
-        }
+            Err((mut l, mut r)) => {
+                // If [l, r) is too long, shorten it to max_len attempting to keep it centered
+                if r - l > max_len {
+                    if l > m - max_len / 2 {
+                        r = l + max_len;
+                    } else if r < m + (max_len + 1) / 2 {
+                        l = r - max_len;
+                    } else {
+                        l = m - max_len / 2;
+                        r = m + (max_len + 1) / 2;
+                    }
+                }
+                (l, r)
+            }
+        };
+        (
+            l.max(0).max(m - load_radius),
+            r.min(self.linemap.file_size).min(m + load_radius),
+        )
     }
 }
 
@@ -76,12 +94,11 @@ impl FileManager {
 
     fn run(self) -> Result<()> {
         while !self.shared.stop.load() {
-            let (m, l, r) = {
+            let (l, r) = {
                 let loaded = self.shared.loaded.lock();
                 let start = Instant::now();
                 // Load data around the hot offset
-                let m = loaded.hot_offset;
-                let (l, r) = loaded.get_range_to_load(self.read_size as i64);
+                let (l, r) = loaded.get_range_to_load(self.read_size as i64, self.load_radius);
                 let segn = loaded.data.segments.len();
                 drop(loaded);
 
@@ -93,13 +110,8 @@ impl FileManager {
                         segn,
                     );
                 }
-                (m, l, r)
+                (l, r)
             };
-            // Clamp segment to load limits
-            let (l, r) = (
-                l.max(0).max(m - self.load_radius),
-                r.min(self.shared.file_size).min(m + self.load_radius),
-            );
             // Load segment
             if r - l >= 4 {
                 eprintln!("loading segment [{}, {})", l, r);

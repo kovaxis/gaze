@@ -504,7 +504,7 @@ impl LineMapper {
         let end = offset + data.len() as i64;
         let mut i;
         let mut l;
-        let mut merge_left = false;
+        let mut rigid_left = offset == 0;
         {
             lock_linemap!(linemap, lmap);
             i = lmap.find_after(offset);
@@ -514,22 +514,22 @@ impl LineMapper {
                     l = s.end.min(end);
                     data = &data[(l - offset) as usize..];
                     i += 1;
-                    merge_left = true;
+                    rigid_left = true;
                 }
             }
         }
         loop {
             // we have a hole from `l` to `r`
-            let (r, next_l, merge_right) = {
+            let (r, next_l, rigid_right) = {
                 lock_linemap!(linemap, lmap);
                 lmap.segments
                     .get(i)
                     .map(|s| (s.start.min(end), s.end.min(end), s.start <= end))
-                    .unwrap_or((end, end, false))
+                    .unwrap_or((end, end, end == lmap.file_size))
             };
             // process data first without locking the linemap
-            let seg = self.create_segment(l, &data[..(r - l) as usize], merge_left, merge_right);
-            merge_left = true;
+            let seg = self.create_segment(l, &data[..(r - l) as usize], rigid_left, rigid_right);
+            rigid_left = true;
             // insert the data into the linemap
             self.insert_segment(linemap, seg);
             // advance to the next hole

@@ -84,19 +84,7 @@ fn assert_sparse_data_eq(t: &TestInst, segs: Vec<(i64, Vec<u8>)>) {
     }
 }
 
-/// The ranges should cover all data.
-fn test_in_order(
-    data: &[u8],
-    max_mem: usize,
-    ranges: impl IntoIterator<Item = ops::Range<i64>>,
-) -> TestInst {
-    let t = init(data.len() as i64, max_mem);
-    for r in ranges {
-        let subdata = &data[r.start as usize..r.end as usize];
-        t.linemapper.process_data(&t.loaded, r.start, subdata);
-        SparseData::insert_data(&t.loaded, r.start, subdata.to_vec());
-    }
-    println!("{:?}", t.loaded.lock().linemap);
+fn assert_full_data_loaded(t: &TestInst, data: &[u8]) {
     let mut x = 0.;
     let mut y = 0;
     let mut idx = 0;
@@ -127,13 +115,34 @@ fn test_in_order(
         }],
     );
     assert_sparse_data_eq(&t, vec![(0, data.to_vec())]);
+}
+
+/// The ranges should cover all data.
+fn test_in_order(
+    data: &[u8],
+    max_mem: usize,
+    ranges: impl IntoIterator<Item = ops::Range<i64>>,
+) -> TestInst {
+    let t = init(data.len() as i64, max_mem);
+    for r in ranges {
+        let subdata = &data[r.start as usize..r.end as usize];
+        t.linemapper.process_data(&t.loaded, r.start, subdata);
+        SparseData::insert_data(&t.loaded, r.start, subdata.to_vec());
+    }
+    println!("{:?}", t.loaded.lock().linemap);
+    assert_full_data_loaded(&t, data);
     t
 }
 
-fn rand_ascii(seed: u64, len: usize) -> Vec<u8> {
+fn rand_binary(seed: u64, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
     let mut rng = TestRng::seed_from_u64(seed);
     rng.fill(&mut data[..]);
+    data
+}
+
+fn rand_ascii(seed: u64, len: usize) -> Vec<u8> {
+    let mut data = rand_binary(seed, len);
     for b in data.iter_mut() {
         *b = *b & 0x7F;
     }
@@ -249,4 +258,86 @@ fn unequal_shuffled() {
         2 * 1024,
         order.iter().map(|&i| splits[i]..splits[i + 1]),
     );
+}
+
+#[test]
+fn binary_babysteps() {
+    let data = rand_binary(0xbadeefdab, 32 * 1024);
+    let t = init(data.len() as i64, 2 * 1024);
+    let mut rsize = 1;
+    loop {
+        let (l, r) = t.loaded.lock().get_range_to_load(rsize, 100000);
+        if l >= r {
+            break;
+        }
+        let old = t
+            .loaded
+            .lock()
+            .linemap
+            .segments
+            .last()
+            .map(|s| s.end)
+            .unwrap_or(0);
+        t.linemapper
+            .process_data(&t.loaded, l, &data[l as usize..r as usize]);
+        SparseData::insert_data(&t.loaded, l, data[l as usize..r as usize].to_vec());
+        if old
+            == t.loaded
+                .lock()
+                .linemap
+                .segments
+                .last()
+                .map(|s| s.end)
+                .unwrap_or(0)
+        {
+            rsize += 1;
+        } else {
+            rsize = 1;
+        }
+        assert!(rsize <= 4);
+    }
+    // println!("{:?}", t.loaded.lock().linemap);
+    assert_full_data_loaded(&t, &data);
+}
+
+#[test]
+fn binary_babysteps_rev() {
+    let data = rand_binary(0xbadeefdab, 32 * 1024);
+    let fsize = data.len() as i64;
+    let t = init(fsize, 2 * 1024);
+    t.loaded.lock().hot_offset = fsize - 1;
+    let mut rsize = 1;
+    loop {
+        let (l, r) = t.loaded.lock().get_range_to_load(rsize, 100000);
+        if l >= r {
+            break;
+        }
+        let old = t
+            .loaded
+            .lock()
+            .linemap
+            .segments
+            .first()
+            .map(|s| s.start)
+            .unwrap_or(fsize);
+        t.linemapper
+            .process_data(&t.loaded, l, &data[l as usize..r as usize]);
+        SparseData::insert_data(&t.loaded, l, data[l as usize..r as usize].to_vec());
+        if old
+            == t.loaded
+                .lock()
+                .linemap
+                .segments
+                .first()
+                .map(|s| s.start)
+                .unwrap_or(fsize)
+        {
+            rsize += 1;
+        } else {
+            rsize = 1;
+        }
+        assert!(rsize <= 4);
+    }
+    // println!("{:?}", t.loaded.lock().linemap);
+    assert_full_data_loaded(&t, &data);
 }
