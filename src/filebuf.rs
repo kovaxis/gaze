@@ -40,10 +40,18 @@ impl LoadedData {
             Ok((l, r)) => {
                 if m - l < r - m && l > 0 || r >= self.linemap.file_size {
                     // Load left side
-                    (l - max_len, l)
+                    if l > m - load_radius {
+                        (l - max_len, l)
+                    } else {
+                        (l, l)
+                    }
                 } else {
                     // Load right side
-                    (r, r + max_len)
+                    if r <= m + load_radius {
+                        (r, r + max_len)
+                    } else {
+                        (r, r)
+                    }
                 }
             }
             Err((mut l, mut r)) => {
@@ -61,10 +69,7 @@ impl LoadedData {
                 (l, r)
             }
         };
-        (
-            l.max(0).max(m - load_radius),
-            r.min(self.linemap.file_size).min(m + load_radius),
-        )
+        (l.max(0), r.min(self.linemap.file_size))
     }
 }
 
@@ -87,7 +92,7 @@ impl FileManager {
         Self {
             file,
             shared,
-            read_size: 64 * 1024,
+            read_size: 512,
             load_radius: 1000,
         }
     }
