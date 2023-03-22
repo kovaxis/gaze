@@ -136,6 +136,7 @@ impl SparseData {
             let overlap = offset + data.len() as i64 - s.offset;
             // Remove duplicate data
             if overlap > 0 {
+                s.offset += overlap;
                 s.data.consume_left(overlap as usize);
             }
             // Only remove segment if all data was overwritten
