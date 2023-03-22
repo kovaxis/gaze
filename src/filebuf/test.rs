@@ -16,8 +16,8 @@ fn init(fsize: i64, max_mem: usize) -> TestInst {
     let font = FontArc::try_from_vec(fs::read("font.ttf").unwrap()).unwrap();
     TestInst {
         loaded: Mutex::new(LoadedData {
-            linemap: LineMap::new(),
-            data: SparseData::new(),
+            linemap: LineMap::new(fsize),
+            data: SparseData::new(fsize),
             hot_offset: 0,
         }),
         linemapper: LineMapper::new(font, max_mem, fsize),

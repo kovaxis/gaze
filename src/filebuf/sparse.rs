@@ -38,12 +38,14 @@ macro_rules! lock_sparse {
 pub struct SparseData {
     pub(super) segments: Vec<SparseSegment>,
     pub(super) merge_batch_size: usize,
+    pub(super) file_size: i64,
 }
 impl SparseData {
-    pub fn new() -> Self {
+    pub fn new(file_size: i64) -> Self {
         Self {
             segments: default(),
             merge_batch_size: 4 * 1024,
+            file_size,
         }
     }
 
@@ -69,39 +71,65 @@ impl SparseData {
         self.segments.len()
     }
 
-    /// Find the index of the segment that contains the given offset.
-    /// If there is no such segment, returns the next segment, or the amount
-    /// of segments if there is no such segment.
-    pub fn find_segment(&self, offset: i64) -> StdResult<usize, usize> {
+    /// If the given offset is contained in a segment, yield its left and right edges.
+    /// If it's not, yield the inner edges of the surrounding segments.
+    /// If there is no segment to a given side, yield the start/end of the file.
+    pub fn find_surroundings(&self, offset: i64) -> Result<(i64, i64), (i64, i64)> {
         for (i, s) in self.segments.iter().enumerate() {
             if s.offset + s.data.len() as i64 > offset {
                 if s.offset <= offset {
-                    return Ok(i);
+                    // Offset is contained in this segment
+                    return Ok((s.offset, s.offset + s.data.len() as i64));
                 } else {
-                    return Err(i);
+                    // This segment is the first segment after the given offset
+                    let prev = match i {
+                        0 => 0,
+                        i => {
+                            let p = &self.segments[i - 1];
+                            p.offset + p.data.len() as i64
+                        }
+                    };
+                    return Err((prev, s.offset));
                 }
             }
         }
-        Err(self.segments.len())
+        let prev = self
+            .segments
+            .last()
+            .map(|s| s.offset + s.data.len() as i64)
+            .unwrap_or(0);
+        Err((prev, self.file_size))
     }
 
     /// Inserts the given data into the given offset.
+    /// If the given data overlaps with previous segments, the previous segments
+    /// will be partially (or completely) discarded to make space for the new
+    /// data.
+    /// The data will be inserted as a fresh segment, without merging wit
+    /// adjacent segments.
+    /// `merge_segments` should be called afterwards to maintain the soft
+    /// invariant that no segments are touching without being merged.
     fn insert_segment(&mut self, offset: i64, data: Vec<u8>) -> usize {
         let mut i = self.find_before(offset);
         let mut j = self.find_after(offset + data.len() as i64);
 
-        if i == self.segments.len() {
-            i = 0;
-        } else if let Some(s) = self.segments.get_mut(i) {
+        if let Some(s) = self.segments.get_mut(i) {
             let overlap = s.offset + s.data.len() as i64 - offset;
             // Remove duplicate data
             if overlap > 0 {
+                if overlap >= data.len() as i64 {
+                    // The provided data is completely redundant
+                    // In this case, just bail and keep the old data
+                    return i;
+                }
                 s.data.consume_right(overlap as usize);
             }
             // Only remove segment if all data was overwritten
             if overlap < s.data.len() as i64 {
                 i += 1;
             }
+        } else {
+            i = 0;
         }
 
         if let Some(s) = self.segments.get_mut(j) {
@@ -128,6 +156,8 @@ impl SparseData {
         i
     }
 
+    /// Merge two adjacent segments, assuming they touch right on the edges.
+    /// Avoids locking the loaded data for long periods, even with huge segments.
     fn merge_segments(handle: SparseHandle, l_idx: usize) {
         lock_sparse!(handle, store, sparse);
         fn get_two(sparse: &mut SparseData, i: usize) -> (&mut SparseSegment, &mut SparseSegment) {
@@ -298,19 +328,13 @@ impl Demem {
 
     /// Remove data from the left.
     fn consume_left(&mut self, count: usize) {
-        assert!(
-            count <= self.mem.len() - self.start,
-            "consumed more than the length"
-        );
+        assert!(count <= self.len(), "consumed more than the length");
         self.start += count;
     }
 
     /// Remove data from the right.
     fn consume_right(&mut self, count: usize) {
-        assert!(
-            count <= self.mem.len() - self.start,
-            "consumed more than the length"
-        );
+        assert!(count <= self.len(), "consumed more than the length");
         self.mem.truncate(self.mem.len() - count);
     }
 }

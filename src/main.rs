@@ -74,6 +74,7 @@ fn main() -> Result<()> {
     }));
 
     let font = FontArc::try_from_vec(fs::read("font.ttf").context("failed to read font file")?)?;
+    let k = Cfg::load_or_new();
 
     let mut state = WindowState {
         file: Some(FileBuffer::open(
@@ -82,8 +83,9 @@ fn main() -> Result<()> {
                 .ok_or(anyhow!("expected file to open as argument"))?
                 .as_ref(),
             font.clone(),
+            k.clone(),
         )?),
-        k: Cfg::load_or_new(),
+        k,
         scroll: ScrollPos {
             base_offset: 0,
             delta_x: 0.,

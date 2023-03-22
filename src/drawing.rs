@@ -288,8 +288,9 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
     frame.finish()?;
 
     let finish = Instant::now();
-    eprint!(
-        "timings:
+    if state.k.log_frame_timing {
+        eprint!(
+            "timings:
     frame init: {:3}ms
     total file access: {:3}ms
     total text queueing: {:3}ms
@@ -298,14 +299,15 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
     draw call: {:3}ms
     swap: {:3}ms
 ",
-        (prefile - start).as_secs_f64() * 1000.,
-        (preuploadtex - prefile - textqueue).as_secs_f64() * 1000.,
-        textqueue.as_secs_f64() * 1000.,
-        (preuploadvert - preuploadtex).as_secs_f64() * 1000.,
-        (predraw - preuploadvert).as_secs_f64() * 1000.,
-        (preswap - predraw).as_secs_f64() * 1000.,
-        (finish - preswap).as_secs_f64() * 1000.,
-    );
+            (prefile - start).as_secs_f64() * 1000.,
+            (preuploadtex - prefile - textqueue).as_secs_f64() * 1000.,
+            textqueue.as_secs_f64() * 1000.,
+            (preuploadvert - preuploadtex).as_secs_f64() * 1000.,
+            (predraw - preuploadvert).as_secs_f64() * 1000.,
+            (preswap - predraw).as_secs_f64() * 1000.,
+            (finish - preswap).as_secs_f64() * 1000.,
+        );
+    }
 
     Ok(())
 }

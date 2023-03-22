@@ -1,6 +1,7 @@
 use ab_glyph::FontArc;
 
 use crate::{
+    cfg::Cfg,
     filebuf::linemap::LineMap,
     filebuf::{linemap::decode_utf8, sparse::SparseData},
     prelude::*,
@@ -21,12 +22,40 @@ pub struct LoadedData {
     pub data: SparseData,
     pub hot_offset: i64,
 }
+impl LoadedData {
+    /// Get the next logical range to load, based on the hot offset and the
+    /// currently loaded data.
+    fn get_range_to_load(&self, max_len: i64) -> (i64, i64) {
+        let m = self.hot_offset;
+        let lm = self.linemap.find_surroundings(m);
+        let sd = self.data.find_surroundings(m);
+        let guide = match (lm, sd) {
+            (Err(lm), Err(sd)) => Err((lm.0.min(sd.0), lm.1.max(sd.1))),
+            (Ok(lm), Ok(sd)) => Ok((lm.0.max(sd.0), lm.1.min(sd.1))),
+            (Err(lm), Ok(_)) => Err(lm),
+            (Ok(_), Err(sd)) => Err(sd),
+        };
+        match guide {
+            Ok((l, r)) => {
+                if m - l < r - m {
+                    // Load left side
+                    (l - max_len, l)
+                } else {
+                    // Load right side
+                    (r, r + max_len)
+                }
+            }
+            Err((l, r)) => (l.max(m - max_len / 2), r.min(m + max_len / 2)),
+        }
+    }
+}
 
 struct Shared {
     file_size: i64,
     stop: AtomicCell<bool>,
     loaded: Mutex<LoadedData>,
     linemapper: LineMapper,
+    k: Cfg,
 }
 
 struct FileManager {
@@ -47,57 +76,12 @@ impl FileManager {
 
     fn run(self) -> Result<()> {
         while !self.shared.stop.load() {
-            let (l, r) = {
+            let (m, l, r) = {
                 let loaded = self.shared.loaded.lock();
                 let start = Instant::now();
-                // load data around the hot offset
-                let hot_offset = loaded.hot_offset;
-                let read_size = self.read_size as i64;
-                let lr = match loaded.data.find_segment(hot_offset) {
-                    Ok(i) => {
-                        // the hot offset itself is already loaded
-                        // load either just before or just after the loaded segment
-                        let lside = loaded.data[i].offset;
-                        let rside = loaded.data[i].offset + loaded.data[i].data.len() as i64;
-                        if hot_offset - lside < rside - hot_offset && lside > 0 {
-                            // load left side
-                            (
-                                loaded
-                                    .data
-                                    .get(i.wrapping_sub(1))
-                                    .map(|s| s.offset + s.data.len() as i64)
-                                    .unwrap_or(0)
-                                    .max(lside - read_size),
-                                lside,
-                            )
-                        } else {
-                            // load right side
-                            (
-                                rside,
-                                loaded
-                                    .data
-                                    .get(i + 1)
-                                    .map(|s| s.offset)
-                                    .unwrap_or(self.shared.file_size)
-                                    .min(rside + read_size),
-                            )
-                        }
-                    }
-                    Err(i) => (
-                        loaded
-                            .data
-                            .get(i.wrapping_sub(1))
-                            .map(|s| s.offset + s.data.len() as i64)
-                            .unwrap_or(0)
-                            .max(hot_offset - read_size / 2),
-                        loaded
-                            .data
-                            .get(i)
-                            .map(|s| s.offset)
-                            .unwrap_or(self.shared.file_size)
-                            .min(hot_offset + read_size / 2),
-                    ),
-                };
+                // Load data around the hot offset
+                let m = loaded.hot_offset;
+                let (l, r) = loaded.get_range_to_load(self.read_size as i64);
                 let segn = loaded.data.segments.len();
                 drop(loaded);
 
@@ -109,14 +93,21 @@ impl FileManager {
                         segn,
                     );
                 }
-                lr
+                (m, l, r)
             };
-            // Load the found segment
-            if l < r {
+            // Clamp segment to load limits
+            let (l, r) = (
+                l.max(0).max(m - self.load_radius),
+                r.min(self.shared.file_size).min(m + self.load_radius),
+            );
+            // Load segment
+            if r - l >= 4 {
+                eprintln!("loading segment [{}, {})", l, r);
                 self.load_segment(l, (r - l) as usize)?;
                 continue;
             }
             // Nothing to load, make sure to idle respectfully
+            // The frontend will notify us if there is any relevant change
             thread::park();
         }
         Ok(())
@@ -131,7 +122,7 @@ impl FileManager {
             .process_data(&self.shared.loaded, offset, &read_buf);
         SparseData::insert_data(&self.shared.loaded, offset, read_buf);
 
-        if false {
+        if self.shared.k.log_segment_load {
             let loaded = self.shared.loaded.lock();
             eprintln!("loaded segment [{}, {})", offset, offset + len as i64);
             eprintln!("new sparse segments: {:?}", loaded.data);
@@ -155,7 +146,7 @@ impl Drop for FileBuffer {
     }
 }
 impl FileBuffer {
-    pub fn open(path: &Path, font: FontArc) -> Result<FileBuffer> {
+    pub fn open(path: &Path, font: FontArc, k: Cfg) -> Result<FileBuffer> {
         // TODO: Do not do file IO on the main thread
         // This requires the file size to be set to 0 for a while
         let mut file = File::open(path)?;
@@ -168,10 +159,11 @@ impl FileBuffer {
         let shared = Arc::new(Shared {
             file_size,
             stop: false.into(),
+            k,
             linemapper: LineMapper::new(font, max_linemap_memory, file_size),
             loaded: LoadedData {
-                data: SparseData::new(),
-                linemap: LineMap::new(),
+                data: SparseData::new(file_size),
+                linemap: LineMap::new(file_size),
                 hot_offset: 0,
             }
             .into(),
@@ -230,13 +222,16 @@ impl FileLock<'_> {
         let loaded = &mut *self.loaded;
         let y0 = pos.delta_y.floor() as i64;
         let y1 = (pos.delta_y + view_size.y).ceil() as i64;
+        let hot_y = (y0 + y1) / 2;
+        let mut hottest: Option<(i64, i64)> = None;
         for y in y0..y1 {
             if let Some([lo, hi, base]) = loaded.linemap.scanline_to_anchors(
                 pos.base_offset,
                 y,
                 (pos.delta_x, pos.delta_x + view_size.x),
             ) {
-                let mut linedata = loaded.data.longest_prefix(lo.offset, hi.offset);
+                let mut offset = lo.offset;
+                let mut linedata = loaded.data.longest_prefix(offset, hi.offset);
                 // NOTE: This subtraction makes no sense if one is relative and the other is absolute
                 let mut dx = lo.x_offset - base.x_offset;
                 let mut dy = lo.y_offset - base.y_offset;
@@ -260,6 +255,14 @@ impl FileLock<'_> {
                         }
                     }
                     linedata = &linedata[adv..];
+                    offset += adv as i64;
+                }
+                // Set hot offset
+                if hottest
+                    .map(|(hy, _)| (y - hot_y).abs() < (hy - hot_y).abs())
+                    .unwrap_or(true)
+                {
+                    hottest = Some((y, offset));
                 }
                 // Process readable text
                 on_char_or_line(dx, dy, None);
@@ -278,24 +281,46 @@ impl FileLock<'_> {
                 }
             }
         }
+        if let Some((_, hoff)) = hottest {
+            let prev = loaded.hot_offset;
+            loaded.hot_offset = hoff;
+            if prev != hoff {
+                self.filebuf.manager.thread().unpark();
+            }
+        }
     }
 }
 
 /// Represents a position within the file, in such a way that as the file gets
 /// loaded the scroll position stays as still as possible.
 ///
-/// The scrolling position represented is the top-left corner of the screen.
+/// The scrolling position represented is usually the top-left corner of the screen.
+///
+/// Scrolling model:
+/// There are 3 scrolling methods available to the user:
+/// 1. Scrolling through the mouse wheel or dragging the screen.
+///     This method is very smooth, and maps simply to modifying the scroll deltas.
+///     This scrolling is clamped to the range of the loaded segment that contains
+///     `base_offset`.
+/// 2. Scrolling through the scroll bar.
+///     This method can perform long scroll jumps, but is still considered "smooth"
+///     in the sense that it can only jump within the currently loaded segment.
+///     In fact, the beggining of scroll bar is mapped to the beggining of the current
+///     segment, and the end of the scroll bar to the end of the current segment.
+///     To maintain good UX, the area represented by the scroll bar may continuously
+///     grow as more file is being loaded, but while the user drags the scroll handle
+///     the scrollbar is frozen. The loaded area may continue to grow, but the scroll
+///     bar will not reflect this until the user releases the scroll handle.
+/// 3. Scrolling directly to an offset.
+///     This is the roughest method to scroll, as it may exit the currently loaded
+///     segment and start loading another segment.
+///     This allows the user to jump to the end of the file or the middle of the file,
+///     without even knowing wether the file is all a single line or thousands of lines.
+///     This is similar to a "go to line" feature.
 pub struct ScrollPos {
-    /// The base offset within the file used as a reference.
-    /// Using this offset, the backend can load the file around this
-    /// offset and build a local map of how the file looks like.
-    /// Changes to this offset can be "seamless", like automatic rebasing
-    /// of the offset, or can be "jagged", like forcefully scrolling to the
-    /// end of the file.
-    /// Moving the base offset across two separate segments in the line map
-    /// is always a jagged movement, and should not be triggerable with smooth
-    /// scrolling methods like the mouse wheel or dragging, only through the
-    /// scroll bar.
+    /// A reference offset within the file.
+    /// This offset is only modified when scrolling jaggedly (ie. jumping directly
+    /// to a file offset).
     pub base_offset: i64,
     /// A difference in visual X position from the base offset, in standard font height units.
     pub delta_x: f64,

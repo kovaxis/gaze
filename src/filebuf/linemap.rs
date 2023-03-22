@@ -30,11 +30,13 @@ pub struct LineMap {
     /// TODO: Set an upper limit on the amount of linemap segments before
     /// dropping small/old segments.
     pub(super) segments: Vec<MappedSegment>,
+    pub(super) file_size: i64,
 }
 impl LineMap {
-    pub fn new() -> Self {
+    pub fn new(file_size: i64) -> Self {
         Self {
             segments: default(),
+            file_size,
         }
     }
 
@@ -67,6 +69,29 @@ impl LineMap {
             .filter(|s| s.start <= offset)
     }
 
+    /// If the given offset is contained in a segment, yield its left and right edges.
+    /// If it's not, yield the inner edges of the surrounding segments.
+    /// If there is no segment to a given side, yield the start/end of the file.
+    pub fn find_surroundings(&self, offset: i64) -> Result<(i64, i64), (i64, i64)> {
+        for (i, s) in self.segments.iter().enumerate() {
+            if s.end > offset {
+                if s.start <= offset {
+                    // Offset is contained in this segment
+                    return Ok((s.start, s.end));
+                } else {
+                    // This segment is the first segment after the given offset
+                    let prev = match i {
+                        0 => 0,
+                        i => self.segments[i - 1].end,
+                    };
+                    return Err((prev, s.start));
+                }
+            }
+        }
+        let prev = self.segments.last().map(|s| s.end).unwrap_or(0);
+        Err((prev, self.file_size))
+    }
+
     /// Maps the given base offset and a delta range to a pair of anchors that contain the scanline.
     /// Note that these anchors might have Y coordinates different to `dy`.
     /// Returns as a third value the reference anchor, against which the `dy` and `dx` values were
@@ -90,8 +115,8 @@ impl LineMap {
         let y = base.y(s.base_y) + dy;
         let x0 = base.x(s.base_x_relative, is_x_abs) + dx.0;
         let x1 = base.x(s.base_x_relative, is_x_abs) + dx.1;
-        let lo = s.locate_lower(y, x0.max(0.))?;
-        let hi = s.locate_upper(y, x1.max(0.))?;
+        let lo = s.locate_lower(y, x0);
+        let hi = s.locate_upper(y, x1);
         Some([lo, hi, base])
     }
 
@@ -146,7 +171,7 @@ impl LineMapper {
         let bytes_per_anchor = usize::try_from(file_size / max_anchors as i64)
             .expect("file too large")
             .max(mem::size_of::<Anchor>()); // reasonable minimum
-        eprintln!("spreading anchors {} bytes away", bytes_per_anchor);
+        eprintln!("spreading anchors {} bytes apart", bytes_per_anchor);
         Self {
             bytes_per_anchor,
             scale: font.height_unscaled().recip(),
@@ -161,19 +186,30 @@ impl LineMapper {
 
     /// Note: A prefix and/or suffix of at most length 3 may be discarded from the given
     /// segment to align with UTF-8 character boundaries.
-    fn create_segment(&self, mut offset: i64, mut data: &[u8]) -> MappedSegment {
+    /// They will not be discarded on the edges if the `rigid` flags are set.
+    fn create_segment(
+        &self,
+        mut offset: i64,
+        mut data: &[u8],
+        rigid_left: bool,
+        rigid_right: bool,
+    ) -> MappedSegment {
         // Try our best to align the beginning and end of the segment to UTF-8 boundaries
         // Always works for valid UTF-8
-        for _ in 0..3.min(data.len()) {
-            if is_utf8_cont(data[0]) {
-                offset += 1;
-                data = &data[1..];
+        if !rigid_left {
+            for _ in 0..3.min(data.len()) {
+                if is_utf8_cont(data[0]) {
+                    offset += 1;
+                    data = &data[1..];
+                }
             }
         }
-        for i in 0..3.min(data.len()) {
-            if utf8_seq_len(data[data.len() - i - 1]) > i + 1 {
-                data = &data[..data.len() - i - 1];
-                break;
+        if !rigid_right {
+            for i in 0..3.min(data.len()) {
+                if utf8_seq_len(data[data.len() - i - 1]) > i + 1 {
+                    data = &data[..data.len() - i - 1];
+                    break;
+                }
             }
         }
 
@@ -468,6 +504,7 @@ impl LineMapper {
         let end = offset + data.len() as i64;
         let mut i;
         let mut l;
+        let mut merge_left = false;
         {
             lock_linemap!(linemap, lmap);
             i = lmap.find_after(offset);
@@ -477,20 +514,22 @@ impl LineMapper {
                     l = s.end.min(end);
                     data = &data[(l - offset) as usize..];
                     i += 1;
+                    merge_left = true;
                 }
             }
         }
         loop {
             // we have a hole from `l` to `r`
-            let (r, next_l) = {
+            let (r, next_l, merge_right) = {
                 lock_linemap!(linemap, lmap);
                 lmap.segments
                     .get(i)
-                    .map(|s| (s.start.min(end), s.end.min(end)))
-                    .unwrap_or((end, end))
+                    .map(|s| (s.start.min(end), s.end.min(end), s.start <= end))
+                    .unwrap_or((end, end, false))
             };
             // process data first without locking the linemap
-            let seg = self.create_segment(l, &data[..(r - l) as usize]);
+            let seg = self.create_segment(l, &data[..(r - l) as usize], merge_left, merge_right);
+            merge_left = true;
             // insert the data into the linemap
             self.insert_segment(linemap, seg);
             // advance to the next hole
@@ -578,7 +617,8 @@ impl MappedSegment {
 
     /// Find the last anchor before or at the given relative Y, breaking ties by
     /// choosing the largest relative/absolute X before the given relative/absolute X.
-    fn locate_lower(&self, y: i64, x: f64) -> Option<Anchor> {
+    /// If there is no such anchor, returns the first anchor.
+    fn locate_lower(&self, y: i64, x: f64) -> Anchor {
         // Ugly hack because `partition_point` does not provide the index
         let rel_offset = self
             .anchors
@@ -589,27 +629,29 @@ impl MappedSegment {
             a.y(self.base_y) < y
                 || a.y(self.base_y) == y && a.x(self.base_x_relative, a.offset >= rel_offset) <= x
         }) {
-            0 => None,
-            i => Some(self.anchors[i - 1]),
+            0 => self.anchors[0],
+            i => self.anchors[i - 1],
         }
     }
 
     /// Find the first anchor at or after the given relative Y, breaking ties by
     /// choosing the smallest relative/absolute X after the given relative/absolute X.
-    fn locate_upper(&self, y: i64, x: f64) -> Option<Anchor> {
+    /// If there is no such anchor, returns the last anchor.
+    fn locate_upper(&self, y: i64, x: f64) -> Anchor {
         // Ugly hack because `partition_point` does not provide the index
         let rel_offset = self
             .anchors
             .get(self.first_absolute)
             .map(|a| a.offset)
             .unwrap_or(self.end + 1);
-        self.anchors
+        *self
+            .anchors
             .get(self.anchors.partition_point(|a| {
                 a.y(self.base_y) < y
                     || a.y(self.base_y) == y
                         && a.x(self.base_x_relative, a.offset >= rel_offset) < x
             }))
-            .copied()
+            .unwrap_or(self.anchors.back().unwrap())
     }
 }
 
