@@ -14,104 +14,9 @@ mod sparse;
 #[cfg(test)]
 mod test;
 
-/*
-/// Indicates that the `line`th line (0-based) starts at file offset `offset`.
-#[derive(Clone, Copy)]
-pub struct LineMapping {
-    pub line: i64,
-    pub offset: i64,
-}
-
-pub struct LineMap {
-    pub anchors: Vec<LineMapping>,
-    pub file_size: i64,
-}
-impl LineMap {
-    fn new(file_size: i64) -> Self {
-        Self {
-            anchors: default(),
-            file_size,
-        }
-    }
-
-    pub fn find_lower(&self, line: i64) -> usize {
-        self.anchors
-            .partition_point(|m| m.line <= line)
-            .saturating_sub(1)
-    }
-
-    /// Map a line number to the last known byte offset that is
-    /// at or before the start of this line.
-    pub fn map_lower_bound(&self, line: i64) -> LineMapping {
-        self.anchors
-            .get(self.find_lower(line))
-            .copied()
-            .unwrap_or(LineMapping { line: 0, offset: 0 })
-    }
-
-    pub fn find_upper(&self, line: i64) -> usize {
-        self.anchors.partition_point(|m| m.line < line)
-    }
-
-    /// Map a line number to the first known byte offset that is
-    /// at or after the start of this line.
-    ///
-    /// Might return the end of the file if the line number is beyond the
-    /// currently loaded lines.
-    pub fn map_upper_bound(&self, line: i64) -> LineMapping {
-        self.anchors
-            .get(self.find_upper(line))
-            .copied()
-            .unwrap_or(LineMapping {
-                line,
-                offset: self.file_size,
-            })
-    }
-
-    pub fn map_approx(&self, line: i64) -> i64 {
-        let lo = self.map_lower_bound(line);
-        let hi = self.map_upper_bound(line);
-        if lo.line == hi.line {
-            return (lo.offset + hi.offset) / 2;
-        }
-        let x = (line - lo.line) as f64 / (hi.line - lo.line) as f64;
-        lo.offset + ((hi.offset - lo.offset) as f64 * x) as i64
-    }
-
-    pub fn iter(&self, lo: i64, hi: i64) -> LineMappingIter {
-        let i = self.find_lower(lo);
-        LineMappingIter { lines: self, i, hi }
-    }
-}
-
-pub struct LineMappingIter<'a> {
-    lines: &'a LineMap,
-    i: usize,
-    hi: i64,
-}
-impl<'a> Iterator for LineMappingIter<'a> {
-    type Item = ops::Range<LineMapping>;
-    fn next(&mut self) -> Option<ops::Range<LineMapping>> {
-        let cur = *self.lines.anchors.get(self.i)?;
-        if cur.line >= self.hi {
-            return None;
-        }
-        self.i += 1;
-        let nxt = self
-            .lines
-            .anchors
-            .get(self.i)
-            .copied()
-            .unwrap_or(LineMapping {
-                line: self.hi,
-                offset: self.lines.file_size,
-            });
-        Some(cur..nxt)
-    }
-}
-*/
-
 pub struct LoadedData {
+    /// TODO: Keep a dense linemap and a sparse linemap, to be able to
+    /// seek large files quickly but also find precise characters quickly.
     pub linemap: LineMap,
     pub data: SparseData,
     pub hot_offset: i64,
@@ -254,12 +159,12 @@ impl FileBuffer {
         // TODO: Do not do file IO on the main thread
         // This requires the file size to be set to 0 for a while
         let mut file = File::open(path)?;
-        let file_size = file
+        let file_size: i64 = file
             .seek(io::SeekFrom::End(0))
             .context("failed to determine length of file")?
             .try_into()
-            .context("file too large")?;
-        let max_linemap_memory = 1024 * 1024;
+            .context("file way too large")?; // can only fail for files larger than 2^63-1
+        let max_linemap_memory = (file_size / 16).clamp(1024 * 1024, 128 * 1024 * 1024) as usize;
         let shared = Arc::new(Shared {
             file_size,
             stop: false.into(),

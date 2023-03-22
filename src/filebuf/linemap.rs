@@ -146,6 +146,7 @@ impl LineMapper {
         let bytes_per_anchor = usize::try_from(file_size / max_anchors as i64)
             .expect("file too large")
             .max(mem::size_of::<Anchor>()); // reasonable minimum
+        eprintln!("spreading anchors {} bytes away", bytes_per_anchor);
         Self {
             bytes_per_anchor,
             scale: font.height_unscaled().recip(),
