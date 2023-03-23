@@ -5,7 +5,6 @@ use gl::glium::{
     uniforms::{MagnifySamplerFilter, MinifySamplerFilter, Uniforms},
     Blend, DrawParameters, Frame, Program, Surface, Texture2d, VertexBuffer,
 };
-use glam::Quat;
 use glyph_brush_draw_cache::DrawCache;
 
 #[derive(Clone, Copy, Debug)]
@@ -162,16 +161,51 @@ impl DrawState {
                     color: [255; 4],
                 };
                 let data = [
-                    vert(-1., -1.),
-                    vert(1., -1.),
+                    vert(0., 0.),
+                    vert(1., 0.),
                     vert(1., 1.),
-                    vert(-1., -1.),
+                    vert(0., 0.),
                     vert(1., 1.),
-                    vert(-1., 1.),
+                    vert(0., 1.),
                 ];
                 VertexBuffer::new(display, &data)?
             },
         })
+    }
+}
+
+struct FrameWrap {
+    frame: mem::ManuallyDrop<Frame>,
+}
+impl ops::Deref for FrameWrap {
+    type Target = Frame;
+    fn deref(&self) -> &Frame {
+        &self.frame
+    }
+}
+impl ops::DerefMut for FrameWrap {
+    fn deref_mut(&mut self) -> &mut Frame {
+        &mut self.frame
+    }
+}
+impl FrameWrap {
+    fn into_inner(mut self) -> Frame {
+        // SAFETY: Safe to take out because `self` is forgotten
+        unsafe {
+            let frame = mem::ManuallyDrop::take(&mut self.frame);
+            mem::forget(self);
+            frame
+        }
+    }
+}
+impl Drop for FrameWrap {
+    fn drop(&mut self) {
+        // SAFETY: After dropping the frame will never be accessed
+        unsafe {
+            if let Err(err) = mem::ManuallyDrop::take(&mut self.frame).finish() {
+                eprintln!("frame was emergency-dropped and raised an error: {:#}", err);
+            }
+        }
     }
 }
 
@@ -181,18 +215,16 @@ impl DrawState {
 pub fn draw(state: &mut WindowState) -> Result<bool> {
     let start = Instant::now();
 
-    let mut frame = state.display.draw();
+    let mut frame = FrameWrap {
+        frame: mem::ManuallyDrop::new(state.display.draw()),
+    };
     {
         let [r, g, b, a] = state.k.bg_color;
         let s = 255f32.recip();
         frame.clear_color(r as f32 * s, g as f32 * s, b as f32 * s, a as f32 * s);
     }
     let (w, h) = frame.get_dimensions();
-
-    let text_view = dvec2(
-        (w as f64 - state.k.left_bar as f64) / state.k.font_height as f64,
-        h as f64 / state.k.font_height as f64,
-    );
+    state.last_size = (w, h);
 
     // Go through file characters, queueing the text for rendering
     let prefile = Instant::now();
@@ -200,62 +232,68 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
     state.draw.text.clear();
     state.draw.linenums.clear();
     let mut all_loaded = true;
-    let mut scroll_bounds = default();
     if let Some(filebuf) = state.file.as_ref() {
         // Lock the shared file data
         // We want to do this only once, to minimize latency
         let mut file = filebuf.lock();
         // Clamp the scroll window to the loaded bounds
-        scroll_bounds = file.clamp_scroll(&mut state.scroll);
+        let scroll_bounds = file.clamp_scroll(&mut state.scroll.pos);
+        state.scroll.last_view = ScrollRect {
+            corner: state.scroll.pos,
+            size: dvec2(
+                (w as f64 - state.k.left_bar as f64) / state.k.font_height as f64,
+                h as f64 / state.k.font_height as f64,
+            ),
+        };
+        if state.scrollbar_drag.is_none() {
+            state.scroll.last_bounds = scroll_bounds;
+        }
         // Iterate over all characters on the screen and queue them up for rendering
         let mut linenum_buf = String::new();
-        all_loaded = file.visit_rect(
-            ScrollRect {
-                corner: state.scroll,
-                size: text_view,
-            },
-            |dx, dy, c| {
-                let inner_start = Instant::now();
-                match c {
-                    None => {
-                        // Starting a line
-                        use std::fmt::Write;
-                        linenum_buf.clear();
-                        let _ = write!(linenum_buf, "{}", dy + 1);
-                        let mut x = state.k.left_bar - state.k.linenum_pad;
-                        let y =
-                            ((dy + 1) as f64 - state.scroll.delta_y) as f32 * state.k.font_height;
-                        for c in linenum_buf.bytes().rev() {
-                            x -= filebuf.advance_for(c as char) as f32 * state.k.font_height;
-                            state.draw.linenums.push(
-                                &mut state.draw.glyphs,
-                                Glyph {
-                                    id: state.draw.font.glyph_id(c as char),
-                                    scale: state.k.font_height.into(),
-                                    position: (x, y).into(),
-                                },
-                            );
-                        }
-                    }
-                    Some(c) => {
-                        // Process a single character
-                        let pos = dvec2(
-                            dx - state.scroll.delta_x,
-                            (dy + 1) as f64 - state.scroll.delta_y,
-                        )
-                        .as_vec2()
-                            * state.k.font_height;
-                        let g = Glyph {
-                            id: state.draw.font.glyph_id(c),
-                            scale: state.k.font_height.into(),
-                            position: (state.k.left_bar + pos.x, pos.y).into(),
-                        };
-                        state.draw.text.push(&mut state.draw.glyphs, g);
+        all_loaded = file.visit_rect(state.scroll.last_view, |dx, dy, c| {
+            let inner_start = Instant::now();
+            match c {
+                None => {
+                    // Starting a line
+                    use std::fmt::Write;
+                    linenum_buf.clear();
+                    let _ = write!(linenum_buf, "{}", dy + 1);
+                    let mut x = state.k.left_bar - state.k.linenum_pad;
+                    let y =
+                        ((dy + 1) as f64 - state.scroll.pos.delta_y) as f32 * state.k.font_height;
+                    for c in linenum_buf.bytes().rev() {
+                        x -= filebuf.advance_for(c as char) as f32 * state.k.font_height;
+                        state.draw.linenums.push(
+                            &mut state.draw.glyphs,
+                            Glyph {
+                                id: state.draw.font.glyph_id(c as char),
+                                scale: state.k.font_height.into(),
+                                position: (x, y).into(),
+                            },
+                        );
                     }
                 }
-                textqueue += inner_start.elapsed();
-            },
-        );
+                Some(c) => {
+                    // Process a single character
+                    let pos = dvec2(
+                        dx - state.scroll.pos.delta_x,
+                        (dy + 1) as f64 - state.scroll.pos.delta_y,
+                    )
+                    .as_vec2()
+                        * state.k.font_height;
+                    let g = Glyph {
+                        id: state.draw.font.glyph_id(c),
+                        scale: state.k.font_height.into(),
+                        position: (state.k.left_bar + pos.x, pos.y).into(),
+                    };
+                    state.draw.text.push(&mut state.draw.glyphs, g);
+                }
+            }
+            textqueue += inner_start.elapsed();
+        });
+    } else {
+        state.scroll.last_bounds = default();
+        state.scroll.last_view = default();
     }
 
     let preuploadtex = Instant::now();
@@ -332,72 +370,56 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         },
     )?;
 
-    // Draw the scrollbar
+    // Draw the scrollbar background
     {
-        let sw = state.k.scrollbar_width;
-        // Draw the scrollbar background
-        {
-            let mvp = mvp
-                * (Mat4::from_translation(vec3(w as f32 - sw / 2., h as f32 / 2., 0.))
-                    * Mat4::from_scale(vec3(sw / 2., h as f32 / 2., 1.)));
-            frame.draw(
-                &state.draw.box_vbo,
-                IndicesSource::NoIndices {
-                    primitives: PrimitiveType::TrianglesList,
-                },
-                &state.draw.flat_shader,
-                &gl::glium::uniform! {
-                    tint: state.k.scrollbar_color.map(|c| c as f32 * (1./255.)),
-                    mvp: mvp.to_cols_array_2d(),
-                },
-                &DrawParameters {
-                    blend: Blend::alpha_blending(),
-                    ..default()
-                },
-            )?;
-        }
-        // Draw the scroll handle
-        {
-            // Compute a float value between 0 and 1 indicating where along
-            // the file is the current vertical scroll
-            let mut ycoef = (state.scroll.delta_y - scroll_bounds.corner.delta_y)
-                / (scroll_bounds.size.y - text_view.y);
-            if ycoef.is_nan() || ycoef < 0. {
-                ycoef = 0.;
-            } else if ycoef > 1. {
-                ycoef = 1.;
-            }
-            // Compute a float representing the fraction of the file that the screen takes up
-            let hcoef = (text_view.y / scroll_bounds.size.y).min(1.);
-            // Position handle in pixels
-            let sh = hcoef as f32 * h as f32;
-            let sy = ycoef as f32 * (h as f32 - sh);
-            let mvp = mvp
-                * (Mat4::from_translation(vec3(w as f32 - sw / 2., sy + sh / 2., 0.))
-                    * Mat4::from_scale(vec3(sw / 2., sh as f32 / 2., 1.)));
-            // Execute scroll handle drawcall
-            frame.draw(
-                &state.draw.box_vbo,
-                IndicesSource::NoIndices {
-                    primitives: PrimitiveType::TrianglesList,
-                },
-                &state.draw.flat_shader,
-                &gl::glium::uniform! {
-                    tint: state.k.scrollhandle_color.map(|c| c as f32 * (1./255.)),
-                    mvp: mvp.to_cols_array_2d(),
-                },
-                &DrawParameters {
-                    blend: Blend::alpha_blending(),
-                    ..default()
-                },
-            )?;
-        }
+        let (p, s) = state.scroll.scrollbar_bounds(&state.k, w, h);
+        let mvp = mvp
+            * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
+        frame.draw(
+            &state.draw.box_vbo,
+            IndicesSource::NoIndices {
+                primitives: PrimitiveType::TrianglesList,
+            },
+            &state.draw.flat_shader,
+            &gl::glium::uniform! {
+                tint: state.k.scrollbar_color.map(|c| c as f32 * (1./255.)),
+                mvp: mvp.to_cols_array_2d(),
+            },
+            &DrawParameters {
+                blend: Blend::alpha_blending(),
+                ..default()
+            },
+        )?;
+    }
+
+    // Draw the scrollbar handle
+    {
+        let (p, s) = state.scroll.scrollhandle_bounds(&state.k, w, h);
+        // Position handle in pixels
+        let mvp = mvp
+            * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
+        // Execute scroll handle drawcall
+        frame.draw(
+            &state.draw.box_vbo,
+            IndicesSource::NoIndices {
+                primitives: PrimitiveType::TrianglesList,
+            },
+            &state.draw.flat_shader,
+            &gl::glium::uniform! {
+                tint: state.k.scrollhandle_color.map(|c| c as f32 * (1./255.)),
+                mvp: mvp.to_cols_array_2d(),
+            },
+            &DrawParameters {
+                blend: Blend::alpha_blending(),
+                ..default()
+            },
+        )?;
     }
 
     let preswap = Instant::now();
 
     // Swap frame (possibly waiting for vsync)
-    frame.finish()?;
+    frame.into_inner().finish()?;
 
     // Log timings if enabled
     let finish = Instant::now();

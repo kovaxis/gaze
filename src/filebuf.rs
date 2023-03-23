@@ -149,7 +149,7 @@ impl FileManager {
             };
             // Load segment
             if r - l >= 4 {
-                eprintln!("loading segment [{}, {})", l, r);
+                // eprintln!("loading segment [{}, {})", l, r);
                 self.load_segment(l, (r - l) as usize)?;
                 continue;
             }

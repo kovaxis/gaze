@@ -9,9 +9,9 @@ const DEFAULT_CFG: &str = r#"
     "linenum_color": [102, 102, 102, 255],
     "text_color": [255, 255, 255, 255],
     "bg_color": [3, 3, 4, 255],
-    "scrollbar_color": [50, 50, 50, 120],
-    "scrollhandle_color": [170, 170, 170, 100],
-    "scrollbar_width": 20,
+    "scrollbar_color": [10, 10, 10, 220],
+    "scrollhandle_color": [150, 150, 150, 255],
+    "scrollbar_width": 18,
     "log_segment_load": false,
     "log_frame_timing": false
 }

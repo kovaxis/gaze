@@ -1,10 +1,10 @@
 use crate::prelude::*;
 use cfg::Cfg;
 use drawing::DrawState;
-use filebuf::ScrollPos;
+use filebuf::{ScrollPos, ScrollRect};
 use gl::{
     glutin::event_loop::ControlFlow,
-    winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta},
+    winit::event::{ElementState, MouseButton, MouseScrollDelta},
     *,
 };
 
@@ -44,24 +44,78 @@ mod cfg;
 mod drawing;
 mod filebuf;
 
+#[derive(Default)]
+struct ScrollManager {
+    pos: ScrollPos,
+    last_view: ScrollRect,
+    last_bounds: ScrollRect,
+}
+impl ScrollManager {
+    /// Compute a float value between 0 and 1 indicating where along
+    /// the file is the current vertical scroll
+    fn ycoef(&self) -> f32 {
+        let mut ycoef = (self.pos.delta_y - self.last_bounds.corner.delta_y)
+            / (self.last_bounds.size.y - self.last_view.size.y);
+        if ycoef.is_nan() || ycoef < 0. {
+            ycoef = 0.;
+        } else if ycoef > 1. {
+            ycoef = 1.;
+        }
+        ycoef as f32
+    }
+
+    /// Compute a float representing the fraction of the file that the screen takes up
+    fn hcoef(&self) -> f32 {
+        let mut hcoef = self.last_view.size.y / self.last_bounds.size.y;
+        if hcoef.is_nan() || hcoef > 1. {
+            hcoef = 1.;
+        }
+        hcoef as f32
+    }
+
+    /// Get the scrollbar rect as origin and size.
+    fn scrollbar_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
+        (
+            vec2(w as f32 - k.scrollbar_width, 0.),
+            vec2(k.scrollbar_width, h as f32),
+        )
+    }
+
+    /// Get the scrollhandle rect as origin and size.
+    fn scrollhandle_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
+        let sh = self.hcoef() as f32 * h as f32;
+        let sy = self.ycoef() as f32 * (h as f32 - sh);
+        (
+            vec2(w as f32 - k.scrollbar_width, sy),
+            vec2(k.scrollbar_width, sh),
+        )
+    }
+}
+
 pub struct WindowState {
     display: Display,
     draw: DrawState,
     file: Option<FileBuffer>,
     k: Cfg,
-    mouse_drag_down: bool,
+    scroll_drag: Option<(DVec2, ScrollPos)>,
+    scrollbar_drag: Option<f32>,
+    last_mouse_pos: DVec2,
+    last_size: (u32, u32),
     focused: bool,
-    scroll: ScrollPos,
+    scroll: ScrollManager,
 }
 impl WindowState {
     fn redraw(&self) {
         self.display.gl_window().window().request_redraw();
     }
 
-    fn scroll(&mut self, pixels_x: f64, pixels_y: f64) {
-        self.scroll.delta_x += pixels_x / self.k.font_height as f64;
-        self.scroll.delta_y += pixels_y / self.k.font_height as f64;
+    fn pixel_to_lines(&self, pix: DVec2) -> DVec2 {
+        pix / self.k.font_height as f64
     }
+}
+
+fn state2bool(e: ElementState) -> bool {
+    e == ElementState::Pressed
 }
 
 fn main() -> Result<()> {
@@ -86,12 +140,11 @@ fn main() -> Result<()> {
             k.clone(),
         )?),
         k,
-        scroll: ScrollPos {
-            base_offset: 0,
-            delta_x: 0.,
-            delta_y: 0.,
-        },
-        mouse_drag_down: false,
+        scroll: default(),
+        scroll_drag: None,
+        scrollbar_drag: None,
+        last_mouse_pos: DVec2::ZERO,
+        last_size: (1, 1),
         focused: false,
         draw: DrawState::new(&display, &font)?,
         display,
@@ -110,34 +163,86 @@ fn main() -> Result<()> {
                         _ => {}
                     },
                     WindowEvent::MouseWheel { delta, .. } => {
-                        let (x, y) = match delta {
-                            MouseScrollDelta::LineDelta(x, y) => (
+                        let d = match delta {
+                            MouseScrollDelta::LineDelta(x, y) => dvec2(
                                 -x as f64 * state.k.font_height as f64,
                                 -y as f64 * state.k.font_height as f64,
                             ),
-                            MouseScrollDelta::PixelDelta(d) => (-d.x, -d.y),
+                            MouseScrollDelta::PixelDelta(d) => dvec2(-d.x, -d.y),
                         };
-                        state.scroll(x, y);
+                        let d = state.pixel_to_lines(d);
+                        state.scroll.pos.delta_x += d.x;
+                        state.scroll.pos.delta_y += d.y;
                         state.redraw();
                     }
                     WindowEvent::MouseInput {
                         state: st, button, ..
-                    } => match button {
-                        MouseButton::Right => state.mouse_drag_down = st == ElementState::Pressed,
-                        _ => {}
-                    },
+                    } => {
+                        let down = state2bool(st);
+                        match button {
+                            MouseButton::Left => {
+                                if down {
+                                    let (p, s) = state.scroll.scrollhandle_bounds(
+                                        &state.k,
+                                        state.last_size.0,
+                                        state.last_size.1,
+                                    );
+                                    let pos = state.last_mouse_pos.as_vec2();
+                                    if pos.x >= p.x
+                                        && pos.x < p.x + s.x
+                                        && pos.y >= p.y
+                                        && pos.y < p.y + s.y
+                                    {
+                                        // Start dragging through scrollbar
+                                        let cut = (pos.y - p.y) / s.y;
+                                        state.scrollbar_drag.get_or_insert(cut);
+                                    }
+                                } else {
+                                    state.scrollbar_drag = None;
+                                }
+                            }
+                            MouseButton::Right => {
+                                if down {
+                                    state
+                                        .scroll_drag
+                                        .get_or_insert((state.last_mouse_pos, state.scroll.pos));
+                                } else {
+                                    state.scroll_drag = None;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let pos = dvec2(position.x, position.y);
+                        if let Some(cut) = state.scrollbar_drag {
+                            let (w, h) = state.last_size;
+                            let (_p, s) = state.scroll.scrollhandle_bounds(&state.k, w, h);
+                            // Coefficient between 0 and 1
+                            let mut y = (pos.y as f32 - s.y * cut) / (h as f32 - s.y);
+                            if y.is_nan() || y < 0. {
+                                y = 0.;
+                            } else if y > 1. {
+                                y = 1.;
+                            }
+                            state.scroll.pos.delta_y = state.scroll.last_bounds.corner.delta_y
+                                + (state.scroll.last_bounds.size.y - state.scroll.last_view.size.y)
+                                    * y as f64;
+                            state.redraw();
+                        } else if let Some((ogpos, ogscr)) = state.scroll_drag {
+                            let d = state.pixel_to_lines(ogpos - pos);
+                            state.scroll.pos.delta_x = ogscr.delta_x + d.x;
+                            state.scroll.pos.delta_y = ogscr.delta_y + d.y;
+                            state.redraw();
+                        }
+                        state.last_mouse_pos = pos;
+                    }
                     WindowEvent::Focused(f) => state.focused = f,
                     _ => {}
                 },
                 Event::DeviceEvent { event, .. } => {
                     if state.focused {
                         match event {
-                            DeviceEvent::MouseMotion { delta: (dx, dy) } => {
-                                if state.mouse_drag_down {
-                                    state.scroll(-dx, -dy);
-                                    state.redraw();
-                                }
-                            }
                             _ => {}
                         }
                     }
