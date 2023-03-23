@@ -142,11 +142,16 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                Event::RedrawRequested(_) => {
-                    if let Err(err) = drawing::draw(&mut state) {
+                Event::RedrawRequested(_) => match drawing::draw(&mut state) {
+                    Ok(redraw_soon) => {
+                        if redraw_soon {
+                            state.redraw();
+                        }
+                    }
+                    Err(err) => {
                         eprintln!("error drawing frame: {:#}", err);
                     }
-                }
+                },
                 _ => {}
             }
         }),

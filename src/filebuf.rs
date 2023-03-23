@@ -260,28 +260,34 @@ impl FileLock<'_> {
             .clamp_pos(&self.loaded.linemap, scroll);
     }
 
-    pub fn iter_lines(
+    /// Iterate over all lines and characters contained in the given rectangle.
+    pub fn visit_rect(
         &mut self,
         view: ScrollRect,
         mut on_char_or_line: impl FnMut(f64, i64, Option<char>),
-    ) {
+    ) -> bool {
         let loaded = &mut *self.loaded;
-        let pos = view.corner;
-        let y0 = pos.delta_y.floor() as i64;
-        let y1 = (pos.delta_y + view.size.y).ceil() as i64;
+        let y0 = view.corner.delta_y.floor() as i64;
+        let y1 = (view.corner.delta_y + view.size.y).ceil() as i64;
+        let x0 = view.corner.delta_x;
+        let x1 = view.corner.delta_x + view.size.x;
+        let mut all_loaded = true;
         for y in y0..y1 {
-            if let Some([lo, hi, base]) = loaded.linemap.scanline_to_anchors(
-                pos.base_offset,
-                y,
-                (pos.delta_x, pos.delta_x + view.size.x),
-            ) {
+            if let Some([lo, hi, base]) =
+                loaded
+                    .linemap
+                    .scanline_to_anchors(view.corner.base_offset, y, (x0, x1))
+            {
                 let mut offset = lo.offset;
                 let mut linedata = loaded.data.longest_prefix(offset, hi.offset);
                 // NOTE: This subtraction makes no sense if one is relative and the other is absolute
                 let mut dx = lo.x_offset - base.x_offset;
                 let mut dy = lo.y_offset - base.y_offset;
+                if dy > y || dy == y && dx > x0 {
+                    all_loaded = false;
+                }
                 // Remove excess data at the beggining of the line
-                while !linedata.is_empty() && (dy < y || dy == y && dx < pos.delta_x) {
+                while !linedata.is_empty() && (dy < y || dy == y && dx < x0) {
                     let (c, adv) = decode_utf8(linedata);
                     match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
                         '\n' => {
@@ -293,7 +299,7 @@ impl FileLock<'_> {
                         }
                         c => {
                             let hadv = self.filebuf.advance_for(c);
-                            if dy == y && dx + hadv > pos.delta_x {
+                            if dy == y && dx + hadv > x0 {
                                 break;
                             }
                             dx += hadv;
@@ -304,7 +310,11 @@ impl FileLock<'_> {
                 }
                 // Process readable text
                 on_char_or_line(dx, dy, None);
-                while !linedata.is_empty() && dx < pos.delta_x + view.size.x {
+                while dy < y || dx < x1 {
+                    if linedata.is_empty() {
+                        all_loaded = false;
+                        break;
+                    }
                     let (c, adv) = decode_utf8(linedata);
                     match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
                         '\n' => {
@@ -317,6 +327,8 @@ impl FileLock<'_> {
                     }
                     linedata = &linedata[adv..];
                 }
+            } else {
+                all_loaded = false;
             }
         }
         // Set hot area
@@ -325,6 +337,8 @@ impl FileLock<'_> {
         if prev != view {
             self.filebuf.manager.thread().unpark();
         }
+        // Let the frontend know whether the entire text is loaded or not
+        all_loaded
     }
 }
 

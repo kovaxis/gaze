@@ -144,7 +144,10 @@ impl DrawState {
     }
 }
 
-pub fn draw(state: &mut WindowState) -> Result<()> {
+/// Returns `true` if the backend is still loading and it would
+/// be good to redraw after a certain timeout to include newly
+/// loaded data.
+pub fn draw(state: &mut WindowState) -> Result<bool> {
     let start = Instant::now();
 
     let mut frame = state.display.draw();
@@ -164,12 +167,16 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
     let mut textqueue = Duration::ZERO;
     state.draw.text.clear();
     state.draw.linenums.clear();
+    let mut all_loaded = true;
     if let Some(filebuf) = state.file.as_ref() {
+        // Lock the shared file data
+        // We want to do this only once, to minimize latency
         let mut file = filebuf.lock();
+        // Clamp the scroll window to the loaded bounds
         file.clamp_scroll(&mut state.scroll);
-        // TODO: Scissor text
+        // Iterate over all characters on the screen and queue them up for rendering
         let mut linenum_buf = String::new();
-        file.iter_lines(
+        all_loaded = file.visit_rect(
             ScrollRect {
                 corner: state.scroll,
                 size: text_view,
@@ -218,7 +225,7 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
         );
     }
 
-    // Process the glyph cache, uploading the glyph rasterized image to GPU
+    // Process the queued glyphs, uploading their rasterized images to the GPU
     let preuploadtex = Instant::now();
 
     let res = state
@@ -316,5 +323,5 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
         );
     }
 
-    Ok(())
+    Ok(!all_loaded)
 }
