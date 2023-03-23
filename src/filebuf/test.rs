@@ -18,7 +18,7 @@ fn init(fsize: i64, max_mem: usize) -> TestInst {
         loaded: Mutex::new(LoadedData {
             linemap: LineMap::new(fsize),
             data: SparseData::new(fsize),
-            hot_offset: 0,
+            hot: default(),
         }),
         linemapper: LineMapper::new(font, max_mem, fsize),
     }
@@ -305,7 +305,7 @@ fn binary_babysteps_rev() {
     let data = rand_binary(0xbadeefdab, 32 * 1024);
     let fsize = data.len() as i64;
     let t = init(fsize, 2 * 1024);
-    t.loaded.lock().hot_offset = fsize - 1;
+    t.loaded.lock().hot.corner.base_offset = fsize - 1;
     let mut rsize = 1;
     loop {
         let (l, r) = t.loaded.lock().get_range_to_load(rsize, 100000);

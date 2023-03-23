@@ -237,10 +237,6 @@ impl SparseData {
         }
         &[][..]
     }
-
-    pub fn get(&self, i: usize) -> Option<&SparseSegment> {
-        self.segments.get(i)
-    }
 }
 impl ops::Index<usize> for SparseData {
     type Output = SparseSegment;

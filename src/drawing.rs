@@ -1,4 +1,4 @@
-use crate::{prelude::*, WindowState};
+use crate::{filebuf::ScrollRect, prelude::*, WindowState};
 use ab_glyph::{Font, Glyph};
 use gl::glium::{
     index::{IndicesSource, PrimitiveType},
@@ -169,46 +169,53 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
         file.clamp_scroll(&mut state.scroll);
         // TODO: Scissor text
         let mut linenum_buf = String::new();
-        file.iter_lines(&state.scroll, text_view, |dx, dy, c| {
-            let inner_start = Instant::now();
-            match c {
-                None => {
-                    // Starting a line
-                    use std::fmt::Write;
-                    linenum_buf.clear();
-                    let _ = write!(linenum_buf, "{}", dy + 1);
-                    let mut x = state.k.left_bar - state.k.linenum_pad;
-                    let y = ((dy + 1) as f64 - state.scroll.delta_y) as f32 * state.k.font_height;
-                    for c in linenum_buf.bytes().rev() {
-                        x -= filebuf.advance_for(c as char) as f32 * state.k.font_height;
-                        state.draw.linenums.push(
-                            &mut state.draw.glyphs,
-                            Glyph {
-                                id: state.draw.font.glyph_id(c as char),
-                                scale: state.k.font_height.into(),
-                                position: (x, y).into(),
-                            },
-                        );
+        file.iter_lines(
+            ScrollRect {
+                corner: state.scroll,
+                size: text_view,
+            },
+            |dx, dy, c| {
+                let inner_start = Instant::now();
+                match c {
+                    None => {
+                        // Starting a line
+                        use std::fmt::Write;
+                        linenum_buf.clear();
+                        let _ = write!(linenum_buf, "{}", dy + 1);
+                        let mut x = state.k.left_bar - state.k.linenum_pad;
+                        let y =
+                            ((dy + 1) as f64 - state.scroll.delta_y) as f32 * state.k.font_height;
+                        for c in linenum_buf.bytes().rev() {
+                            x -= filebuf.advance_for(c as char) as f32 * state.k.font_height;
+                            state.draw.linenums.push(
+                                &mut state.draw.glyphs,
+                                Glyph {
+                                    id: state.draw.font.glyph_id(c as char),
+                                    scale: state.k.font_height.into(),
+                                    position: (x, y).into(),
+                                },
+                            );
+                        }
+                    }
+                    Some(c) => {
+                        // Process a single character
+                        let pos = dvec2(
+                            dx - state.scroll.delta_x,
+                            (dy + 1) as f64 - state.scroll.delta_y,
+                        )
+                        .as_vec2()
+                            * state.k.font_height;
+                        let g = Glyph {
+                            id: state.draw.font.glyph_id(c),
+                            scale: state.k.font_height.into(),
+                            position: (state.k.left_bar + pos.x, pos.y).into(),
+                        };
+                        state.draw.text.push(&mut state.draw.glyphs, g);
                     }
                 }
-                Some(c) => {
-                    // Process a single character
-                    let pos = dvec2(
-                        dx - state.scroll.delta_x,
-                        (dy + 1) as f64 - state.scroll.delta_y,
-                    )
-                    .as_vec2()
-                        * state.k.font_height;
-                    let g = Glyph {
-                        id: state.draw.font.glyph_id(c),
-                        scale: state.k.font_height.into(),
-                        position: (state.k.left_bar + pos.x, pos.y).into(),
-                    };
-                    state.draw.text.push(&mut state.draw.glyphs, g);
-                }
-            }
-            textqueue += inner_start.elapsed();
-        });
+                textqueue += inner_start.elapsed();
+            },
+        );
     }
 
     // Process the glyph cache, uploading the glyph rasterized image to GPU

@@ -20,14 +20,44 @@ pub struct LoadedData {
     /// seek large files quickly but also find precise characters quickly.
     pub linemap: LineMap,
     pub data: SparseData,
-    pub hot_offset: i64,
+    pub hot: ScrollRect,
 }
 impl LoadedData {
-    /// Get the next logical range to load, based on the hot offset and the
+    fn try_get_hot_range(&self) -> Option<(i64, i64, i64)> {
+        // Get bounds
+        let base = self.hot.corner.base_offset;
+        let y0 = self.hot.corner.delta_y.floor() as i64;
+        let ym = (self.hot.corner.delta_y + self.hot.size.y / 2.).floor() as i64;
+        let y1 = (self.hot.corner.delta_y + self.hot.size.y).ceil() as i64;
+        let x0 = self.hot.corner.delta_x;
+        let x1 = self.hot.corner.delta_x + self.hot.size.x;
+        let xm = (x0 + x1) / 2.;
+        // Get offsets
+        let l = self
+            .linemap
+            .scanline_to_anchors(base, y0, (x0, x0))
+            .map(|a| a[0])?;
+        let m = self
+            .linemap
+            .scanline_to_anchors(base, ym, (xm, xm))
+            .map(|a| a[0])?;
+        let r = self
+            .linemap
+            .scanline_to_anchors(base, y1, (x1, x1))
+            .map(|a| a[0])?;
+        Some((l.offset, m.offset, r.offset))
+    }
+
+    fn get_hot_range(&self) -> (i64, i64, i64) {
+        let m = self.hot.corner.base_offset;
+        self.try_get_hot_range().unwrap_or((m, m, m))
+    }
+
+    /// Get the next logical range to load, based on the hot scrollpos and the
     /// currently loaded data.
     /// May return invalid (negative) ranges if there is no more data to load.
     fn get_range_to_load(&self, max_len: i64, load_radius: i64) -> (i64, i64) {
-        let m = self.hot_offset;
+        let (lscreen, m, rscreen) = self.get_hot_range();
         let lm = self.linemap.find_surroundings(m);
         let sd = self.data.find_surroundings(m);
         let guide = match (lm, sd) {
@@ -38,16 +68,16 @@ impl LoadedData {
         };
         let (l, r) = match guide {
             Ok((l, r)) => {
-                if m - l < r - m && l > 0 || r >= self.linemap.file_size {
+                if lscreen - l < r - rscreen && l > 0 || r >= self.linemap.file_size {
                     // Load left side
-                    if l > m - load_radius {
+                    if l > lscreen - load_radius {
                         (l - max_len, l)
                     } else {
                         (l, l)
                     }
                 } else {
                     // Load right side
-                    if r <= m + load_radius {
+                    if r <= rscreen + load_radius {
                         (r, r + max_len)
                     } else {
                         (r, r)
@@ -181,7 +211,7 @@ impl FileBuffer {
             loaded: LoadedData {
                 data: SparseData::new(file_size),
                 linemap: LineMap::new(file_size),
-                hot_offset: 0,
+                hot: default(),
             }
             .into(),
         });
@@ -232,20 +262,18 @@ impl FileLock<'_> {
 
     pub fn iter_lines(
         &mut self,
-        pos: &ScrollPos,
-        view_size: DVec2,
+        view: ScrollRect,
         mut on_char_or_line: impl FnMut(f64, i64, Option<char>),
     ) {
         let loaded = &mut *self.loaded;
+        let pos = view.corner;
         let y0 = pos.delta_y.floor() as i64;
-        let y1 = (pos.delta_y + view_size.y).ceil() as i64;
-        let hot_y = (y0 + y1) / 2;
-        let mut hottest: Option<(i64, i64)> = None;
+        let y1 = (pos.delta_y + view.size.y).ceil() as i64;
         for y in y0..y1 {
             if let Some([lo, hi, base]) = loaded.linemap.scanline_to_anchors(
                 pos.base_offset,
                 y,
-                (pos.delta_x, pos.delta_x + view_size.x),
+                (pos.delta_x, pos.delta_x + view.size.x),
             ) {
                 let mut offset = lo.offset;
                 let mut linedata = loaded.data.longest_prefix(offset, hi.offset);
@@ -274,16 +302,9 @@ impl FileLock<'_> {
                     linedata = &linedata[adv..];
                     offset += adv as i64;
                 }
-                // Set hot offset
-                if hottest
-                    .map(|(hy, _)| (y - hot_y).abs() < (hy - hot_y).abs())
-                    .unwrap_or(true)
-                {
-                    hottest = Some((y, offset));
-                }
                 // Process readable text
                 on_char_or_line(dx, dy, None);
-                while !linedata.is_empty() && dx < pos.delta_x + view_size.x {
+                while !linedata.is_empty() && dx < pos.delta_x + view.size.x {
                     let (c, adv) = decode_utf8(linedata);
                     match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
                         '\n' => {
@@ -298,20 +319,17 @@ impl FileLock<'_> {
                 }
             }
         }
-        if let Some((_, hoff)) = hottest {
-            let prev = loaded.hot_offset;
-            loaded.hot_offset = hoff;
-            if prev != hoff {
-                self.filebuf.manager.thread().unpark();
-            }
+        // Set hot area
+        let prev = loaded.hot;
+        loaded.hot = view;
+        if prev != view {
+            self.filebuf.manager.thread().unpark();
         }
     }
 }
 
 /// Represents a position within the file, in such a way that as the file gets
 /// loaded the scroll position stays as still as possible.
-///
-/// The scrolling position represented is usually the top-left corner of the screen.
 ///
 /// Scrolling model:
 /// There are 3 scrolling methods available to the user:
@@ -334,6 +352,7 @@ impl FileLock<'_> {
 ///     This allows the user to jump to the end of the file or the middle of the file,
 ///     without even knowing wether the file is all a single line or thousands of lines.
 ///     This is similar to a "go to line" feature.
+#[derive(Copy, Clone, PartialEq, Default)]
 pub struct ScrollPos {
     /// A reference offset within the file.
     /// This offset is only modified when scrolling jaggedly (ie. jumping directly
@@ -343,6 +362,14 @@ pub struct ScrollPos {
     pub delta_x: f64,
     /// A difference in visual Y position from the base offset, as a fractional number of lines.
     pub delta_y: f64,
+}
+
+#[derive(Copy, Clone, PartialEq, Default)]
+pub struct ScrollRect {
+    /// The top-left corner.
+    pub corner: ScrollPos,
+    /// The size of this view in line units.
+    pub size: DVec2,
 }
 
 type LoadedDataHandle<'a> = &'a Mutex<LoadedData>;
