@@ -4,7 +4,7 @@ use ab_glyph::Font;
 
 use crate::prelude::*;
 
-use super::{LoadedData, LoadedDataGuard, ScrollPos};
+use super::{LoadedData, LoadedDataGuard, ScrollPos, ScrollRect};
 
 /// There are two diferent "coordinate systems" in a text file:
 /// - Raw byte offset
@@ -543,23 +543,52 @@ impl LineMapper {
         }
     }
 
-    pub fn clamp_pos(&self, lmap: &LineMap, pos: &mut ScrollPos) {
+    pub fn bounding_rect(&self, lmap: &LineMap, pos: ScrollPos) -> ScrollRect {
         match lmap.offset_to_base(pos.base_offset) {
             Some((s, base)) => {
                 // Confine to the limits of loaded data
                 // TODO: Clamp to maximum length of any line
                 // This requires keeping track of the maximum width of each segment
-                let y = base.y(s.base_y) as f64;
-                let x = base.x(s.base_x_relative, s.is_x_absolute(base));
-                let end = *s.anchors.back().unwrap();
-                let end_y = end.y(s.base_y) as f64 - y;
-                pos.delta_y = pos.delta_y.clamp(-y, end_y);
-                pos.delta_x = pos.delta_x.max(-x);
+                if s.is_x_absolute(base) {
+                    let lo = s.anchors[s.first_absolute];
+                    let hi = s.anchors.back().unwrap();
+                    ScrollRect {
+                        corner: ScrollPos {
+                            base_offset: pos.base_offset,
+                            delta_x: -base.x_abs(),
+                            delta_y: (lo.y_offset - base.y_offset) as f64,
+                        },
+                        size: dvec2(f64::INFINITY, (hi.y_offset - lo.y_offset) as f64),
+                    }
+                } else {
+                    // NOTE: This clamps rendering to the Y of the relative-x line
+                    // Rendering mixed relative and absolute lines in the same screen
+                    // is kind of hard and messy
+                    let lo = s.anchors.front().unwrap();
+                    let hi = s
+                        .anchors
+                        .get(s.first_absolute)
+                        .unwrap_or(s.anchors.back().unwrap());
+                    ScrollRect {
+                        corner: ScrollPos {
+                            base_offset: pos.base_offset,
+                            delta_x: lo.x_offset - base.x_offset,
+                            delta_y: 0.,
+                        },
+                        size: dvec2(f64::INFINITY, (hi.y_offset - lo.y_offset) as f64),
+                    }
+                }
             }
             None => {
                 // Cannot scroll if the data is not yet loaded
-                pos.delta_x = 0.;
-                pos.delta_y = 0.;
+                ScrollRect {
+                    corner: ScrollPos {
+                        base_offset: pos.base_offset,
+                        delta_x: 0.,
+                        delta_y: 0.,
+                    },
+                    size: DVec2::ZERO,
+                }
             }
         }
     }

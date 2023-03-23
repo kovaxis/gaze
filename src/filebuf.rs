@@ -253,11 +253,19 @@ impl FileLock<'_> {
         }
     }
 
-    pub fn clamp_scroll(&mut self, scroll: &mut ScrollPos) {
-        self.filebuf
+    pub fn clamp_scroll(&mut self, scroll: &mut ScrollPos) -> ScrollRect {
+        let rect = self
+            .filebuf
             .shared
             .linemapper
-            .clamp_pos(&self.loaded.linemap, scroll);
+            .bounding_rect(&self.loaded.linemap, *scroll);
+        scroll.delta_y = scroll
+            .delta_y
+            .clamp(rect.corner.delta_y, rect.corner.delta_y + rect.size.y);
+        scroll.delta_x = scroll
+            .delta_x
+            .clamp(rect.corner.delta_x, rect.corner.delta_x + rect.size.x);
+        rect
     }
 
     /// Iterate over all lines and characters contained in the given rectangle.
