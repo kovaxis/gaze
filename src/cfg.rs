@@ -133,11 +133,11 @@ impl Cfg {
         if let Some(path) = Self::load_path() {
             match Self::load(&path) {
                 Ok(cfg) => {
-                    eprintln!("loaded config from \"{}\"", path.display());
+                    println!("loaded config from \"{}\"", path.display());
                     return cfg;
                 }
                 Err(err) => {
-                    eprintln!(
+                    println!(
                         "WARNING: could not load config from \"{}\": {:#}",
                         path.display(),
                         err
@@ -148,14 +148,14 @@ impl Cfg {
         let cfg = Self::default();
         if let Some(save_path) = Self::near_exe() {
             if save_path.exists() {
-                eprintln!(
+                println!(
                     "not saving default config: file already exists at \"{}\"",
                     save_path.display()
                 );
             } else {
                 match cfg.save_to(&save_path) {
-                    Ok(()) => eprintln!("saved default config to \"{}\"", save_path.display()),
-                    Err(err) => eprintln!(
+                    Ok(()) => println!("saved default config to \"{}\"", save_path.display()),
+                    Err(err) => println!(
                         "WARNING: could not save config to \"{}\": {:#}",
                         save_path.display(),
                         err

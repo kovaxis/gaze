@@ -348,7 +348,7 @@ fn main() -> Result<()> {
                         }
                     }
                     Err(err) => {
-                        eprintln!("error drawing frame: {:#}", err);
+                        println!("error drawing frame: {:#}", err);
                     }
                 },
                 _ => {}

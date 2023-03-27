@@ -37,6 +37,8 @@ struct SegSpec {
     abs_y: bool,
     start_y: i64,
     end_y: i64,
+    widest: f64,
+    rel_width: f64,
 }
 
 fn assert_linemap_segs_eq(t: &TestInst, segs: Vec<SegSpec>) {
@@ -56,6 +58,8 @@ fn assert_linemap_segs_eq(t: &TestInst, segs: Vec<SegSpec>) {
                 assert!(got.anchors[got.first_absolute - 1].offset < ex.abs_x_since);
             }
         }
+        assert_eq!(got.widest_line, ex.widest);
+        assert_eq!(got.rel_width, ex.rel_width);
         assert_eq!(got.anchors.front().unwrap().x(got), ex.start_x);
         assert_eq!(got.anchors.back().unwrap().x(got), ex.end_x);
         assert_eq!(got.anchors.front().unwrap().y(got), ex.start_y);
@@ -75,20 +79,27 @@ fn assert_sparse_data_eq(t: &TestInst, segs: Vec<(i64, Vec<u8>)>) {
 fn assert_full_data_loaded(t: &TestInst, data: &[u8]) {
     let mut x = 0.;
     let mut y = 0;
+    let mut w = 0f64;
     let mut idx = 0;
     while idx < data.len() {
         let (c, adv) = decode_utf8(&data[idx..]);
+        let c_i = idx;
         idx += adv;
+        let x_i = x;
         match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
             '\n' => {
+                w = w.max(x);
                 x = 0.;
                 y += 1;
+                println!("char {} is newline", c_i);
             }
             c => {
                 x += t.linemapper.advance_for(c);
+                println!("char [{}, {}) uses x [{}, {})", c_i, idx, x_i, x);
             }
         }
     }
+    w = w.max(x);
     assert_linemap_segs_eq(
         &t,
         vec![SegSpec {
@@ -100,6 +111,8 @@ fn assert_full_data_loaded(t: &TestInst, data: &[u8]) {
             abs_y: true,
             start_y: 0,
             end_y: y,
+            widest: w,
+            rel_width: 0.,
         }],
     );
     assert_sparse_data_eq(&t, vec![(0, data.to_vec())]);
@@ -117,6 +130,7 @@ fn test_in_order(
         t.linemapper.process_data(&t.loaded, r.start, subdata);
         SparseData::insert_data(&t.loaded, r.start, subdata.to_vec());
     }
+    println!("data:\n{}\n", String::from_utf8_lossy(data));
     println!("{:?}", t.loaded.lock().linemap);
     assert_full_data_loaded(&t, data);
     t
@@ -284,7 +298,8 @@ fn binary_babysteps() {
         }
         assert!(rsize <= 4);
     }
-    // println!("{:?}", t.loaded.lock().linemap);
+    println!("data:\n{}\n", String::from_utf8_lossy(&data));
+    println!("{:?}", t.loaded.lock().linemap);
     assert_full_data_loaded(&t, &data);
 }
 
@@ -326,6 +341,11 @@ fn binary_babysteps_rev() {
         }
         assert!(rsize <= 4);
     }
-    // println!("{:?}", t.loaded.lock().linemap);
+    println!("data:");
+    for (i, b) in data.iter().enumerate() {
+        println!("{:02}: {:03} = {:02x} = {:08b}", i, b, b, b);
+    }
+    println!("data:\n{}\n", String::from_utf8_lossy(&data));
+    println!("{:?}", t.loaded.lock().linemap);
     assert_full_data_loaded(&t, &data);
 }

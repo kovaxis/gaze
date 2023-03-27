@@ -164,7 +164,7 @@ impl FileManager {
 
                 let lockt = start.elapsed();
                 if lockt > Duration::from_millis(10) {
-                    eprintln!(
+                    println!(
                         "took {}ms to find segment to load within {} segments",
                         lockt.as_secs_f64() * 1000.,
                         segn,
@@ -177,7 +177,6 @@ impl FileManager {
                 if l % (16 * 1024 * 1024) > r % (16 * 1024 * 1024) {
                     eprintln!("loaded {:.2}MB", l as f64 / 1024. / 1024.);
                 }
-                // eprintln!("loading segment [{}, {})", l, r);
                 self.load_segment(l, (r - l) as usize, store_data)?;
                 continue;
             }
@@ -215,32 +214,32 @@ impl FileManager {
 
         if self.shared.k.log.segment_load {
             let loaded = self.shared.loaded.lock();
-            eprintln!("loaded segment [{}, {})", offset, offset + len as i64);
+            println!("loaded segment [{}, {})", offset, offset + len as i64);
             if self.shared.k.log.segment_timing {
-                eprintln!("  timing:");
-                eprintln!(
+                println!("  timing:");
+                println!(
                     "    io read: {:.2}ms",
                     (lmap_start - read_start).as_secs_f64() * 1000.
                 );
-                eprintln!(
+                println!(
                     "    linemap store: {:.2}ms",
                     (data_start - lmap_start).as_secs_f64() * 1000.
                 );
-                eprintln!(
+                println!(
                     "    data store: {:.2}ms",
                     (finish - data_start).as_secs_f64() * 1000.
                 );
             }
             if self.shared.k.log.segment_details {
-                eprintln!("  new sparse segments:");
+                println!("  new sparse segments:");
                 for s in loaded.data.segments.iter() {
-                    eprintln!("    [{}, {})", s.offset, s.offset + s.data.len() as i64);
+                    println!("    [{}, {})", s.offset, s.offset + s.data.len() as i64);
                 }
-                eprintln!("  new linemap segments:");
+                println!("  new linemap segments:");
                 for s in loaded.linemap.segments.iter() {
                     let start = s.anchors.front().unwrap();
                     let end = s.anchors.back().unwrap();
-                    eprintln!(
+                    println!(
                         "    [{}, {}) from {}:{} to {}:{}",
                         s.start,
                         s.end,
@@ -250,7 +249,7 @@ impl FileManager {
                         end.x(s),
                     );
                     for a in s.anchors.iter() {
-                        eprintln!("      {} at {}:{}", a.offset, a.y(s), a.x(s));
+                        println!("      {} at {}:{}", a.offset, a.y(s), a.x(s));
                     }
                 }
             }
@@ -309,7 +308,7 @@ impl FileBuffer {
             let shared = shared.clone();
             thread::spawn(move || {
                 FileManager::new(shared, file).run()?;
-                eprintln!("manager thread finishing");
+                println!("manager thread finishing");
                 Ok(())
             })
         };
@@ -320,7 +319,7 @@ impl FileBuffer {
         FileLock::new(self)
     }
 
-    pub fn file_size(&self) -> i64 {
+    pub fn _file_size(&self) -> i64 {
         self.shared.file_size
     }
 
@@ -503,7 +502,7 @@ impl LoadedDataGuard<'_> {
     fn check_time(&self) {
         let t = self.start.elapsed();
         if t > Duration::from_millis(5) {
-            eprintln!(
+            println!(
                 "operation locked common data for {}ms",
                 t.as_secs_f64() * 1000.
             );

@@ -203,7 +203,7 @@ impl Drop for FrameWrap {
         // SAFETY: After dropping the frame will never be accessed
         unsafe {
             if let Err(err) = mem::ManuallyDrop::take(&mut self.frame).finish() {
-                eprintln!("frame was emergency-dropped and raised an error: {:#}", err);
+                println!("frame was emergency-dropped and raised an error: {:#}", err);
             }
         }
     }
@@ -322,7 +322,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
             );
         });
     if let Err(err) = res {
-        eprintln!("failed to write font cache: {:#}", err);
+        println!("failed to write font cache: {:#}", err);
     }
 
     let preuploadvert = Instant::now();

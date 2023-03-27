@@ -176,14 +176,14 @@ impl LineMapper {
         let bytes_per_anchor = usize::try_from(file_size / max_anchors as i64)
             .expect("file too large")
             .max(mem::size_of::<Anchor>()); // reasonable minimum
-        eprintln!("spreading anchors {} bytes apart", bytes_per_anchor);
+        println!("spreading anchors {} bytes apart", bytes_per_anchor);
         let font_h = font.height_unscaled();
         let mut char_adv: FxHashMap<char, f32> = default();
         char_adv.reserve(font.glyph_count());
         for (glyph, c) in font.codepoint_ids() {
             char_adv.insert(c, font.h_advance_unscaled(glyph) / font_h);
         }
-        eprintln!("got {} char -> hadvance mappings", char_adv.len());
+        println!("got {} char -> hadvance mappings", char_adv.len());
         Self {
             char_adv,
             default_char_adv: font.h_advance_unscaled(font.glyph_id('\0')) / font_h,
@@ -213,6 +213,8 @@ impl LineMapper {
                 if is_utf8_cont(data[0]) {
                     offset += 1;
                     data = &data[1..];
+                } else {
+                    break;
                 }
             }
         }
@@ -233,6 +235,8 @@ impl LineMapper {
                 base_y: 100,
                 base_x_relative: 100.,
                 first_absolute: 0,
+                widest_line: 0.,
+                rel_width: 0.,
                 anchors: VecDeque::with_capacity(data.len() / self.bytes_per_anchor + 2),
             }
         };
@@ -262,6 +266,11 @@ impl LineMapper {
             }
             match c {
                 '\n' => {
+                    if abs_x {
+                        seg.widest_line = seg.widest_line.max(cur_x);
+                    } else {
+                        seg.rel_width = cur_x + seg.base_x_relative;
+                    }
                     cur_x = 0.;
                     cur_y += 1;
                     abs_x = true;
@@ -270,6 +279,11 @@ impl LineMapper {
                     cur_x += self.advance_for(c);
                 }
             }
+        }
+        if abs_x {
+            seg.widest_line = seg.widest_line.max(cur_x);
+        } else {
+            seg.rel_width = cur_x + seg.base_x_relative;
         }
         if anchor_acc != 0 {
             seg.anchors.push_back(Anchor {
@@ -292,6 +306,27 @@ impl LineMapper {
         fn get_two(lmap: &mut LineMap, l: usize) -> (&mut MappedSegment, &mut MappedSegment) {
             let (a, b) = lmap.segments.split_at_mut(l + 1);
             (&mut a[l], &mut b[0])
+        }
+        {
+            // NOTE: The maximum width of the segments will temporarily be wrong, but
+            // doing this correctly is way too expensive with the current implementation
+            // The length of the relative line will also be temporarily wrong
+            let (l, r) = get_two(lmap, l_idx);
+            let mut wide = l.widest_line.max(r.widest_line);
+            if l.first_absolute < l.anchors.len() {
+                // Factor the absolute line that is created by tacking the relative
+                // line onto an absolute line
+                let w = l.anchors.back().unwrap().x_abs() + r.rel_width;
+                wide = wide.max(w);
+            } else {
+                l.rel_width += r.rel_width;
+            }
+            if into_left {
+                l.widest_line = wide;
+            } else {
+                r.widest_line = wide;
+            }
+            r.rel_width = l.rel_width;
         }
         if !into_left {
             // There is a very special case when merging a segment into the right
@@ -325,7 +360,7 @@ impl LineMapper {
         // and slowly copying the data over while regularly bumping the mutex
         loop {
             if into_left {
-                // Move anchors from the right segment to the left segment
+                // Move anchors from the RIGHT segment to the LEFT segment
                 let (ldst, rsrc) = get_two(lmap, l_idx);
                 let batch_size = self.migrate_batch_size.min(rsrc.anchors.len() - 1);
                 if batch_size == 0 {
@@ -334,11 +369,12 @@ impl LineMapper {
                 // Remove the end anchor because it is duplicated with the
                 // start anchor of the next segment
                 let og_ldst_len = ldst.anchors.len();
-                let dst_end_anchor = ldst.anchors.pop_back().unwrap();
+                let dst_end_anchor = *ldst.anchors.back().unwrap();
                 let end_y = dst_end_anchor.y(ldst);
                 let end_x = dst_end_anchor.x(ldst);
+                ldst.anchors.pop_back();
                 // Map the absolute index from the right segment to the left segment
-                let og_src_first_absolute = rsrc.first_absolute;
+                let og_rsrc_first_absolute = rsrc.first_absolute;
                 if ldst.first_absolute >= og_ldst_len {
                     ldst.first_absolute = og_ldst_len - 1 + rsrc.first_absolute.min(batch_size + 1);
                 }
@@ -357,7 +393,7 @@ impl LineMapper {
                     // Whether this anchor will be absolute in the destination segment
                     let dst_abs = og_ldst_len - 1 + i >= ldst.first_absolute;
                     // Whether this anchor was absolute in the source segment
-                    let src_abs = i >= og_src_first_absolute;
+                    let src_abs = i >= og_rsrc_first_absolute;
                     match (dst_abs, src_abs) {
                         (true, true) => {} // No conversion
                         (true, false) => {
@@ -548,8 +584,6 @@ impl LineMapper {
         match lmap.offset_to_base(pos.base_offset) {
             Some((s, base)) => {
                 // Confine to the limits of loaded data
-                // TODO: Clamp to maximum length of any line
-                // This requires keeping track of the maximum width of each segment
                 if s.is_x_absolute(base) {
                     let lo = s.anchors[s.first_absolute];
                     let hi = s.anchors.back().unwrap();
@@ -559,7 +593,7 @@ impl LineMapper {
                             delta_x: -base.x_abs(),
                             delta_y: (lo.y_offset - base.y_offset) as f64,
                         },
-                        size: dvec2(f64::INFINITY, (hi.y_offset - lo.y_offset) as f64),
+                        size: dvec2(s.widest_line, (hi.y_offset - lo.y_offset) as f64),
                     }
                 } else {
                     // NOTE: This clamps rendering to the Y of the relative-x line
@@ -576,7 +610,7 @@ impl LineMapper {
                             delta_x: lo.x_offset - base.x_offset,
                             delta_y: 0.,
                         },
-                        size: dvec2(f64::INFINITY, (hi.y_offset - lo.y_offset) as f64),
+                        size: dvec2(s.rel_width, (hi.y_offset - lo.y_offset) as f64),
                     }
                 }
             }
@@ -617,6 +651,16 @@ pub struct MappedSegment {
     /// The coordinates in relative-X anchors must be added with this value to have any meaning.
     /// This allows to shift the X coordinate of the entire relative prefix of a segment quickly.
     pub(super) base_x_relative: f64,
+    /// The widest *absolute* line that this segment contains.
+    /// Does not include the first relative line, if any.
+    /// Includes the last line, which may not end in a newline!
+    /// If there are no absolute lines, is zero.
+    /// This value may overestimate if segments are currently being merged!
+    pub(super) widest_line: f64,
+    /// The X width of the single relative line.
+    /// If there is no relative line, this is zero.
+    /// This value may be completely wrong if segments are currently being merged!
+    pub(super) rel_width: f64,
     /// A set of anchor points, representing known reference points with X and Y coordinates.
     /// There is always an anchor at the start of the segment and at the end of the segment.
     pub(super) anchors: VecDeque<Anchor>,
@@ -714,42 +758,66 @@ fn utf8_seq_len(b: u8) -> usize {
 /// results.
 pub fn decode_utf8(b: &[u8]) -> (Result<char, u8>, usize) {
     assert!(!b.is_empty());
-    let len = utf8_seq_len(b[0]);
-    if b.len() < len {
-        return (Err(b[0]), 1);
+    if b[0] & 0b1000_0000 == 0 {
+        // Single byte
+        (Ok(b[0] as char), 1)
+    } else if b[0] & 0b0100_0000 == 0 {
+        // Continuation byte
+        (Err(b[0]), 1)
+    } else if b[0] & 0b0010_0000 == 0 {
+        // Two bytes
+        if b.len() < 2 || !is_utf8_cont(b[1]) {
+            (Err(b[0]), 1)
+        } else {
+            // SAFETY: From the standard library docs:
+            // A char is a ‘Unicode scalar value’, which is any ‘Unicode code point’ other than a
+            // surrogate code point. This has a fixed numerical definition: code points are in the
+            // range 0 to 0x10FFFF, inclusive. Surrogate code points, used by UTF-16, are in the range
+            // 0xD800 to 0xDFFF.
+            // Because the resulting `u32` only has at most the lowest 11 bits set, it never reaches
+            // into the invalid range (it is always in the range 0x000 - 0x7FF)
+            unsafe {
+                (
+                    Ok(char::from_u32_unchecked(
+                        (b[0] as u32 & 0b0001_1111) << 6 | (b[1] as u32 & 0b0011_1111),
+                    )),
+                    2,
+                )
+            }
+        }
+    } else if b[0] & 0b0001_0000 == 0 {
+        // Three bytes
+        if b.len() < 3 || !is_utf8_cont(b[1]) || !is_utf8_cont(b[2]) {
+            (Err(b[0]), 1)
+        } else {
+            match char::from_u32(
+                (b[0] as u32 & 0b1111) << 12
+                    | (b[1] as u32 & 0b0011_1111) << 6
+                    | (b[2] as u32 & 0b0011_1111),
+            ) {
+                Some(c) => (Ok(c), 3),
+                None => (Err(b[0]), 1),
+            }
+        }
+    } else if b[0] & 0b0000_1000 == 0 {
+        // Four bytes
+        if b.len() < 4 || !is_utf8_cont(b[1]) || !is_utf8_cont(b[2]) || !is_utf8_cont(b[3]) {
+            (Err(b[0]), 1)
+        } else {
+            match char::from_u32(
+                (b[0] as u32 & 0b0111) << 18
+                    | (b[1] as u32 & 0b0011_1111) << 12
+                    | (b[2] as u32 & 0b0011_1111) << 6
+                    | (b[3] as u32 & 0b0011_1111),
+            ) {
+                Some(c) => (Ok(c), 4),
+                None => (Err(b[0]), 1),
+            }
+        }
+    } else {
+        // Invalid header byte
+        (Err(b[0]), 1)
     }
-    let c = match len {
-        1 => b[0] as char,
-        // SAFETY: From the standard library docs:
-        // A char is a ‘Unicode scalar value’, which is any ‘Unicode code point’ other than a
-        // surrogate code point. This has a fixed numerical definition: code points are in the
-        // range 0 to 0x10FFFF, inclusive. Surrogate code points, used by UTF-16, are in the range
-        // 0xD800 to 0xDFFF.
-        // Because the resulting `u32` only has at most the lowest 11 bits set, it never reaches
-        // into the invalid range (it is always in the range 0x000 - 0x7FF)
-        2 => unsafe {
-            mem::transmute((b[0] as u32 & 0b0001_1111) << 6 | (b[1] as u32 & 0b0011_1111))
-        },
-        3 => match char::from_u32(
-            (b[0] as u32 & 0b1111) << 12
-                | (b[1] as u32 & 0b0011_1111) << 6
-                | (b[2] as u32 & 0b0011_1111),
-        ) {
-            Some(c) => c,
-            None => return (Err(b[0]), 1),
-        },
-        4 => match char::from_u32(
-            (b[0] as u32 & 0b0111) << 18
-                | (b[1] as u32 & 0b0011_1111) << 12
-                | (b[2] as u32 & 0b0011_1111) << 6
-                | (b[3] as u32 & 0b0011_1111),
-        ) {
-            Some(c) => c,
-            None => return (Err(b[0]), 1),
-        },
-        _ => return (Err(b[0]), 1),
-    };
-    (Ok(c), len)
 }
 
 #[derive(Clone, Copy, Debug)]
