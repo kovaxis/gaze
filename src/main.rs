@@ -20,6 +20,7 @@ mod prelude {
         Vec4,
     };
     pub use parking_lot::{Mutex, MutexGuard};
+    pub use rustc_hash::{FxHashMap, FxHashSet};
     pub use serde::{Deserialize, Serialize};
     pub use std::{
         cell::Cell,
@@ -64,7 +65,8 @@ impl ScrollManager {
         ycoef as f32
     }
 
-    /// Compute a float representing the fraction of the file that the screen takes up
+    /// Compute a float representing the fraction of the file that the screen takes up.
+    /// Note that the scrollhandle may be larger if a lower limit is reached.
     fn hcoef(&self) -> f32 {
         let mut hcoef = self.last_view.size.y / self.last_bounds.size.y;
         if hcoef.is_nan() || hcoef > 1. {
@@ -76,18 +78,18 @@ impl ScrollManager {
     /// Get the scrollbar rect as origin and size.
     fn scrollbar_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
         (
-            vec2(w as f32 - k.scrollbar_width, 0.),
-            vec2(k.scrollbar_width, h as f32),
+            vec2(w as f32 - k.g.scrollbar_width, 0.),
+            vec2(k.g.scrollbar_width, h as f32),
         )
     }
 
     /// Get the scrollhandle rect as origin and size.
     fn scrollhandle_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
-        let sh = self.hcoef() as f32 * h as f32;
+        let sh = (self.hcoef() as f32 * h as f32).max(k.g.scrollhandle_min_size);
         let sy = self.ycoef() as f32 * (h as f32 - sh);
         (
-            vec2(w as f32 - k.scrollbar_width, sy),
-            vec2(k.scrollbar_width, sh),
+            vec2(w as f32 - k.g.scrollbar_width, sy),
+            vec2(k.g.scrollbar_width, sh),
         )
     }
 }
@@ -110,7 +112,7 @@ impl WindowState {
     }
 
     fn pixel_to_lines(&self, pix: DVec2) -> DVec2 {
-        pix / self.k.font_height as f64
+        pix / self.k.g.font_height as f64
     }
 }
 
@@ -164,13 +166,11 @@ fn main() -> Result<()> {
                     },
                     WindowEvent::MouseWheel { delta, .. } => {
                         let d = match delta {
-                            MouseScrollDelta::LineDelta(x, y) => dvec2(
-                                -x as f64 * state.k.font_height as f64,
-                                -y as f64 * state.k.font_height as f64,
-                            ),
-                            MouseScrollDelta::PixelDelta(d) => dvec2(-d.x, -d.y),
+                            MouseScrollDelta::LineDelta(x, y) => dvec2(-x as f64, -y as f64),
+                            MouseScrollDelta::PixelDelta(d) => {
+                                state.pixel_to_lines(dvec2(-d.x, -d.y))
+                            }
                         };
-                        let d = state.pixel_to_lines(d);
                         state.scroll.pos.delta_x += d.x;
                         state.scroll.pos.delta_y += d.y;
                         state.redraw();

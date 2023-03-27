@@ -219,7 +219,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         frame: mem::ManuallyDrop::new(state.display.draw()),
     };
     {
-        let [r, g, b, a] = state.k.bg_color;
+        let [r, g, b, a] = state.k.g.bg_color;
         let s = 255f32.recip();
         frame.clear_color(r as f32 * s, g as f32 * s, b as f32 * s, a as f32 * s);
     }
@@ -241,8 +241,8 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         state.scroll.last_view = ScrollRect {
             corner: state.scroll.pos,
             size: dvec2(
-                (w as f64 - state.k.left_bar as f64) / state.k.font_height as f64,
-                h as f64 / state.k.font_height as f64,
+                (w as f64 - state.k.g.left_bar as f64) / state.k.g.font_height as f64,
+                h as f64 / state.k.g.font_height as f64,
             ),
         };
         if state.scrollbar_drag.is_none() {
@@ -258,16 +258,16 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
                     use std::fmt::Write;
                     linenum_buf.clear();
                     let _ = write!(linenum_buf, "{}", dy + 1);
-                    let mut x = state.k.left_bar - state.k.linenum_pad;
+                    let mut x = state.k.g.left_bar - state.k.g.linenum_pad;
                     let y =
-                        ((dy + 1) as f64 - state.scroll.pos.delta_y) as f32 * state.k.font_height;
+                        ((dy + 1) as f64 - state.scroll.pos.delta_y) as f32 * state.k.g.font_height;
                     for c in linenum_buf.bytes().rev() {
-                        x -= filebuf.advance_for(c as char) as f32 * state.k.font_height;
+                        x -= filebuf.advance_for(c as char) as f32 * state.k.g.font_height;
                         state.draw.linenums.push(
                             &mut state.draw.glyphs,
                             Glyph {
                                 id: state.draw.font.glyph_id(c as char),
-                                scale: state.k.font_height.into(),
+                                scale: state.k.g.font_height.into(),
                                 position: (x, y).into(),
                             },
                         );
@@ -280,11 +280,11 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
                         (dy + 1) as f64 - state.scroll.pos.delta_y,
                     )
                     .as_vec2()
-                        * state.k.font_height;
+                        * state.k.g.font_height;
                     let g = Glyph {
                         id: state.draw.font.glyph_id(c),
-                        scale: state.k.font_height.into(),
-                        position: (state.k.left_bar + pos.x, pos.y).into(),
+                        scale: state.k.g.font_height.into(),
+                        position: (state.k.g.left_bar + pos.x, pos.y).into(),
                     };
                     state.draw.text.push(&mut state.draw.glyphs, g);
                 }
@@ -328,9 +328,9 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
     state
         .draw
         .text
-        .upload_verts(state.k.text_color, &mut state.draw.glyphs, &state.display)?;
+        .upload_verts(state.k.g.text_color, &mut state.draw.glyphs, &state.display)?;
     state.draw.linenums.upload_verts(
-        state.k.linenum_color,
+        state.k.g.linenum_color,
         &mut state.draw.glyphs,
         &state.display,
     )?;
@@ -352,9 +352,9 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         &DrawParameters {
             blend: Blend::alpha_blending(),
             scissor: Some(gl::glium::Rect {
-                left: state.k.left_bar.round() as u32,
+                left: state.k.g.left_bar.round() as u32,
                 bottom: 0,
-                width: w - state.k.left_bar.round() as u32,
+                width: w - state.k.g.left_bar.round() as u32,
                 height: h,
             }),
             ..default()
@@ -382,7 +382,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
             },
             &state.draw.flat_shader,
             &gl::glium::uniform! {
-                tint: state.k.scrollbar_color.map(|c| c as f32 * (1./255.)),
+                tint: state.k.g.scrollbar_color.map(|c| c as f32 * (1./255.)),
                 mvp: mvp.to_cols_array_2d(),
             },
             &DrawParameters {
@@ -406,7 +406,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
             },
             &state.draw.flat_shader,
             &gl::glium::uniform! {
-                tint: state.k.scrollhandle_color.map(|c| c as f32 * (1./255.)),
+                tint: state.k.g.scrollhandle_color.map(|c| c as f32 * (1./255.)),
                 mvp: mvp.to_cols_array_2d(),
             },
             &DrawParameters {
@@ -423,7 +423,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
 
     // Log timings if enabled
     let finish = Instant::now();
-    if state.k.log_frame_timing {
+    if state.k.log.frame_timing {
         eprint!(
             "timings:
     frame init: {:3}ms

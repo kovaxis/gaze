@@ -53,38 +53,23 @@ impl LoadedData {
         self.try_get_hot_range().unwrap_or((m, m, m))
     }
 
-    /// Get the next logical range to load, based on the hot scrollpos and the
-    /// currently loaded data.
-    /// May return invalid (negative) ranges if there is no more data to load.
-    fn get_range_to_load(&self, max_len: i64, load_radius: i64) -> (i64, i64) {
-        let (lscreen, m, rscreen) = self.get_hot_range();
-        let lm = self.linemap.find_surroundings(m);
-        let sd = self.data.find_surroundings(m);
-        let guide = match (lm, sd) {
-            (Err(lm), Err(sd)) => Err((lm.0.min(sd.0), lm.1.max(sd.1))),
-            (Ok(lm), Ok(sd)) => Ok((lm.0.max(sd.0), lm.1.min(sd.1))),
-            (Err(lm), Ok(_)) => Err(lm),
-            (Ok(_), Err(sd)) => Err(sd),
-        };
-        let (l, r) = match guide {
-            Ok((l, r)) => {
+    fn surroundings_to_range(
+        &self,
+        s: Surroundings,
+        (lscreen, m, rscreen): (i64, i64, i64),
+        max_len: i64,
+    ) -> (i64, i64) {
+        let (l, r) = match s {
+            Surroundings::In(l, r) => {
                 if lscreen - l < r - rscreen && l > 0 || r >= self.linemap.file_size {
                     // Load left side
-                    if l > lscreen - load_radius {
-                        (l - max_len, l)
-                    } else {
-                        (l, l)
-                    }
+                    (l - max_len, l)
                 } else {
                     // Load right side
-                    if r <= rscreen + load_radius {
-                        (r, r + max_len)
-                    } else {
-                        (r, r)
-                    }
+                    (r, r + max_len)
                 }
             }
-            Err((mut l, mut r)) => {
+            Surroundings::Out(mut l, mut r) => {
                 // If [l, r) is too long, shorten it to max_len attempting to keep it centered
                 if r - l > max_len {
                     if l > m - max_len / 2 {
@@ -101,11 +86,50 @@ impl LoadedData {
         };
         (l.max(0), r.min(self.linemap.file_size))
     }
+
+    /// Get the next logical range to load, based on the hot scrollpos and the
+    /// currently loaded data.
+    /// May return invalid (negative) ranges if there is no more data to load.
+    /// Also returns a boolean indicating if the range is "close" and its data
+    /// should be stored (as opposed to "far away" ranges that should only be
+    /// linemapped but not loaded).
+    fn get_range_to_load(&self, max_len: i64, load_radius: i64) -> ((i64, i64), bool) {
+        let (lscreen, m, rscreen) = self.get_hot_range();
+        let lm = self.linemap.find_surroundings(m);
+        let sd = self.data.find_surroundings(m);
+        let guide = lm.min(sd);
+        let (l, r) = self.surroundings_to_range(guide, (lscreen, m, rscreen), max_len);
+        if lscreen - r >= load_radius || l - rscreen > load_radius {
+            // Nothing more to load, proceed to linemap farther out
+            let (l, r) = self.surroundings_to_range(lm, (lscreen, m, rscreen), max_len);
+            ((l, r), false)
+        } else {
+            ((l, r), true)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Surroundings {
+    In(i64, i64),
+    Out(i64, i64),
+}
+impl Surroundings {
+    fn min(self, b: Surroundings) -> Surroundings {
+        use Surroundings::*;
+        match (self, b) {
+            (Out(al, ar), Out(bl, br)) => Out(al.min(bl), ar.max(br)),
+            (In(al, ar), In(bl, br)) => In(al.max(bl), ar.min(br)),
+            (Out(l, r), In(..)) => Out(l, r),
+            (In(..), Out(l, r)) => Out(l, r),
+        }
+    }
 }
 
 struct Shared {
     file_size: i64,
     stop: AtomicCell<bool>,
+    sleeping: AtomicCell<bool>,
     loaded: Mutex<LoadedData>,
     linemapper: LineMapper,
     k: Cfg,
@@ -114,26 +138,27 @@ struct Shared {
 struct FileManager {
     shared: Arc<Shared>,
     file: File,
-    read_size: usize,
-    load_radius: i64,
+    read_buf: Vec<u8>,
 }
 impl FileManager {
     fn new(shared: Arc<Shared>, file: File) -> Self {
         Self {
+            read_buf: default(),
             file,
             shared,
-            read_size: 512,
-            load_radius: 1000,
         }
     }
 
-    fn run(self) -> Result<()> {
+    fn run(mut self) -> Result<()> {
         while !self.shared.stop.load() {
-            let (l, r) = {
+            let ((l, r), store_data) = {
                 let loaded = self.shared.loaded.lock();
                 let start = Instant::now();
                 // Load data around the hot offset
-                let (l, r) = loaded.get_range_to_load(self.read_size as i64, self.load_radius);
+                let out = loaded.get_range_to_load(
+                    self.shared.k.f.read_size as i64,
+                    self.shared.k.f.load_radius as i64,
+                );
                 let segn = loaded.data.segments.len();
                 drop(loaded);
 
@@ -145,35 +170,70 @@ impl FileManager {
                         segn,
                     );
                 }
-                (l, r)
+                out
             };
             // Load segment
-            if r - l >= 4 {
+            if r - l >= 4 || self.shared.file_size < 4 {
+                if l % (16 * 1024 * 1024) > r % (16 * 1024 * 1024) {
+                    eprintln!("loaded {:.2}MB", l as f64 / 1024. / 1024.);
+                }
                 // eprintln!("loading segment [{}, {})", l, r);
-                self.load_segment(l, (r - l) as usize)?;
+                self.load_segment(l, (r - l) as usize, store_data)?;
                 continue;
             }
             // Nothing to load, make sure to idle respectfully
             // The frontend will notify us if there is any relevant change
+            self.shared.sleeping.store(true);
             thread::park();
+            self.shared.sleeping.store(false);
         }
         Ok(())
     }
 
-    fn load_segment(&self, offset: i64, len: usize) -> Result<()> {
-        let mut read_buf = vec![0; len];
+    fn load_segment(&mut self, offset: i64, len: usize, store_data: bool) -> Result<()> {
+        let read_start = Instant::now();
+
+        if self.read_buf.len() < len {
+            self.read_buf.resize(len, 0);
+        }
         (&self.file).seek(io::SeekFrom::Start(offset as u64))?;
-        (&self.file).read_exact(&mut read_buf)?;
+        (&self.file).read_exact(&mut self.read_buf[..len])?;
+
+        let lmap_start = Instant::now();
         self.shared
             .linemapper
-            .process_data(&self.shared.loaded, offset, &read_buf);
-        SparseData::insert_data(&self.shared.loaded, offset, read_buf);
+            .process_data(&self.shared.loaded, offset, &self.read_buf);
 
-        if self.shared.k.log_segment_load {
+        let data_start = Instant::now();
+        if store_data {
+            let read_buf = mem::take(&mut self.read_buf);
+            SparseData::insert_data(&self.shared.loaded, offset, read_buf);
+        }
+
+        let finish = Instant::now();
+
+        if self.shared.k.log.segment_load {
             let loaded = self.shared.loaded.lock();
             eprintln!("loaded segment [{}, {})", offset, offset + len as i64);
-            eprintln!("new sparse segments: {:?}", loaded.data);
-            eprintln!("new linemap segments: {:?}", loaded.linemap);
+            if self.shared.k.log.segment_timing {
+                eprintln!("  timing:");
+                eprintln!(
+                    "    io read: {:.2}ms",
+                    (lmap_start - read_start).as_secs_f64() * 1000.
+                );
+                eprintln!(
+                    "    linemap store: {:.2}ms",
+                    (data_start - lmap_start).as_secs_f64() * 1000.
+                );
+                eprintln!(
+                    "    data store: {:.2}ms",
+                    (finish - data_start).as_secs_f64() * 1000.
+                );
+            }
+            if self.shared.k.log.segment_details {
+                eprintln!("  new sparse segments: {:?}", loaded.data);
+                eprintln!("  new linemap segments: {:?}", loaded.linemap);
+            }
         }
         Ok(())
     }
@@ -202,18 +262,28 @@ impl FileBuffer {
             .context("failed to determine length of file")?
             .try_into()
             .context("file way too large")?; // can only fail for files larger than 2^63-1
-        let max_linemap_memory = (file_size / 16).clamp(1024 * 1024, 128 * 1024 * 1024) as usize;
+        let memk = &k.f.linemap_mem;
+        let max_linemap_memory = ((file_size as f64 * memk.fract)
+            .clamp(memk.min_mb * 1024. * 1024., memk.max_mb * 1024. * 1024.)
+            as i64)
+            .clamp(0, isize::MAX as i64) as usize;
         let shared = Arc::new(Shared {
             file_size,
             stop: false.into(),
-            k,
-            linemapper: LineMapper::new(font, max_linemap_memory, file_size),
+            sleeping: false.into(),
+            linemapper: LineMapper::new(
+                font,
+                file_size,
+                max_linemap_memory,
+                k.f.migrate_batch_size,
+            ),
             loaded: LoadedData {
                 data: SparseData::new(file_size),
                 linemap: LineMap::new(file_size),
                 hot: default(),
             }
             .into(),
+            k,
         });
         let manager = {
             let shared = shared.clone();
@@ -269,6 +339,7 @@ impl FileLock<'_> {
     }
 
     /// Iterate over all lines and characters contained in the given rectangle.
+    /// Returns whether the backend is idle or not.
     pub fn visit_rect(
         &mut self,
         view: ScrollRect,
@@ -279,7 +350,6 @@ impl FileLock<'_> {
         let y1 = (view.corner.delta_y + view.size.y).ceil() as i64;
         let x0 = view.corner.delta_x;
         let x1 = view.corner.delta_x + view.size.x;
-        let mut all_loaded = true;
         for y in y0..y1 {
             if let Some([lo, hi, base]) =
                 loaded
@@ -291,9 +361,6 @@ impl FileLock<'_> {
                 // NOTE: This subtraction makes no sense if one is relative and the other is absolute
                 let mut dx = lo.x_offset - base.x_offset;
                 let mut dy = lo.y_offset - base.y_offset;
-                if dy > y || dy == y && dx > x0 {
-                    all_loaded = false;
-                }
                 // Remove excess data at the beggining of the line
                 while !linedata.is_empty() && (dy < y || dy == y && dx < x0) {
                     let (c, adv) = decode_utf8(linedata);
@@ -318,11 +385,7 @@ impl FileLock<'_> {
                 }
                 // Process readable text
                 on_char_or_line(dx, dy, None);
-                while dy < y || dx < x1 {
-                    if linedata.is_empty() {
-                        all_loaded = false;
-                        break;
-                    }
+                while !linedata.is_empty() && (dy < y || dx < x1) {
                     let (c, adv) = decode_utf8(linedata);
                     match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
                         '\n' => {
@@ -335,8 +398,6 @@ impl FileLock<'_> {
                     }
                     linedata = &linedata[adv..];
                 }
-            } else {
-                all_loaded = false;
             }
         }
         // Set hot area
@@ -346,7 +407,7 @@ impl FileLock<'_> {
             self.filebuf.manager.thread().unpark();
         }
         // Let the frontend know whether the entire text is loaded or not
-        all_loaded
+        self.filebuf.shared.sleeping.load()
     }
 }
 

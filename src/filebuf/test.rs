@@ -20,7 +20,7 @@ fn init(fsize: i64, max_mem: usize) -> TestInst {
             data: SparseData::new(fsize),
             hot: default(),
         }),
-        linemapper: LineMapper::new(font, max_mem, fsize),
+        linemapper: LineMapper::new(font, fsize, max_mem, 1024),
     }
 }
 
@@ -266,7 +266,7 @@ fn binary_babysteps() {
     let t = init(data.len() as i64, 2 * 1024);
     let mut rsize = 1;
     loop {
-        let (l, r) = t.loaded.lock().get_range_to_load(rsize, 100000);
+        let ((l, r), _store) = t.loaded.lock().get_range_to_load(rsize, 100000);
         if l >= r {
             break;
         }
@@ -308,7 +308,7 @@ fn binary_babysteps_rev() {
     t.loaded.lock().hot.corner.base_offset = fsize - 1;
     let mut rsize = 1;
     loop {
-        let (l, r) = t.loaded.lock().get_range_to_load(rsize, 100000);
+        let ((l, r), _store) = t.loaded.lock().get_range_to_load(rsize, 100000);
         if l >= r {
             break;
         }

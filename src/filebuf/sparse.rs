@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-use super::{LoadedData, LoadedDataGuard};
+use super::{LoadedData, LoadedDataGuard, Surroundings};
 
 #[derive(Debug)]
 pub struct SparseSegment {
@@ -74,12 +74,12 @@ impl SparseData {
     /// If the given offset is contained in a segment, yield its left and right edges.
     /// If it's not, yield the inner edges of the surrounding segments.
     /// If there is no segment to a given side, yield the start/end of the file.
-    pub fn find_surroundings(&self, offset: i64) -> Result<(i64, i64), (i64, i64)> {
+    pub fn find_surroundings(&self, offset: i64) -> Surroundings {
         for (i, s) in self.segments.iter().enumerate() {
             if s.offset + s.data.len() as i64 > offset {
                 if s.offset <= offset {
                     // Offset is contained in this segment
-                    return Ok((s.offset, s.offset + s.data.len() as i64));
+                    return Surroundings::In(s.offset, s.offset + s.data.len() as i64);
                 } else {
                     // This segment is the first segment after the given offset
                     let prev = match i {
@@ -89,7 +89,7 @@ impl SparseData {
                             p.offset + p.data.len() as i64
                         }
                     };
-                    return Err((prev, s.offset));
+                    return Surroundings::Out(prev, s.offset);
                 }
             }
         }
@@ -98,7 +98,7 @@ impl SparseData {
             .last()
             .map(|s| s.offset + s.data.len() as i64)
             .unwrap_or(0);
-        Err((prev, self.file_size))
+        Surroundings::Out(prev, self.file_size)
     }
 
     /// Inserts the given data into the given offset.

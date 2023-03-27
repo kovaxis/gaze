@@ -4,7 +4,7 @@ use ab_glyph::Font;
 
 use crate::prelude::*;
 
-use super::{LoadedData, LoadedDataGuard, ScrollPos, ScrollRect};
+use super::{LoadedData, LoadedDataGuard, ScrollPos, ScrollRect, Surroundings};
 
 /// There are two diferent "coordinate systems" in a text file:
 /// - Raw byte offset
@@ -72,24 +72,24 @@ impl LineMap {
     /// If the given offset is contained in a segment, yield its left and right edges.
     /// If it's not, yield the inner edges of the surrounding segments.
     /// If there is no segment to a given side, yield the start/end of the file.
-    pub fn find_surroundings(&self, offset: i64) -> Result<(i64, i64), (i64, i64)> {
+    pub fn find_surroundings(&self, offset: i64) -> Surroundings {
         for (i, s) in self.segments.iter().enumerate() {
             if s.end > offset {
                 if s.start <= offset {
                     // Offset is contained in this segment
-                    return Ok((s.start, s.end));
+                    return Surroundings::In(s.start, s.end);
                 } else {
                     // This segment is the first segment after the given offset
                     let prev = match i {
                         0 => 0,
                         i => self.segments[i - 1].end,
                     };
-                    return Err((prev, s.start));
+                    return Surroundings::Out(prev, s.start);
                 }
             }
         }
         let prev = self.segments.last().map(|s| s.end).unwrap_or(0);
-        Err((prev, self.file_size))
+        Surroundings::Out(prev, self.file_size)
     }
 
     /// Maps the given base offset and a delta range to a pair of anchors that contain the scanline.
@@ -159,29 +159,41 @@ macro_rules! lock_linemap {
 
 pub struct LineMapper {
     pub(super) bytes_per_anchor: usize,
-    pub(super) font: FontArc,
-    pub(super) scale: f32,
     pub(super) migrate_batch_size: usize,
+    pub(super) char_adv: FxHashMap<char, f32>,
+    pub(super) default_char_adv: f32,
 }
 impl LineMapper {
     pub const REPLACEMENT_CHAR: char = char::REPLACEMENT_CHARACTER;
 
-    pub fn new(font: FontArc, max_memory: usize, file_size: i64) -> Self {
+    pub fn new(
+        font: FontArc,
+        file_size: i64,
+        max_memory: usize,
+        migrate_batch_size: usize,
+    ) -> Self {
         let max_anchors = max_memory / mem::size_of::<Anchor>();
         let bytes_per_anchor = usize::try_from(file_size / max_anchors as i64)
             .expect("file too large")
             .max(mem::size_of::<Anchor>()); // reasonable minimum
         eprintln!("spreading anchors {} bytes apart", bytes_per_anchor);
+        let font_h = font.height_unscaled();
+        let mut char_adv: FxHashMap<char, f32> = default();
+        char_adv.reserve(font.glyph_count());
+        for (glyph, c) in font.codepoint_ids() {
+            char_adv.insert(c, font.h_advance_unscaled(glyph) / font_h);
+        }
+        eprintln!("got {} char -> hadvance mappings", char_adv.len());
         Self {
+            char_adv,
+            default_char_adv: font.h_advance_unscaled(font.glyph_id('\0')) / font_h,
             bytes_per_anchor,
-            scale: font.height_unscaled().recip(),
-            font,
-            migrate_batch_size: 1024,
+            migrate_batch_size,
         }
     }
 
     pub fn advance_for(&self, c: char) -> f64 {
-        (self.font.h_advance_unscaled(self.font.glyph_id(c)) * self.scale) as f64
+        *self.char_adv.get(&c).unwrap_or(&self.default_char_adv) as f64
     }
 
     /// Note: A prefix and/or suffix of at most length 3 may be discarded from the given
@@ -221,14 +233,14 @@ impl LineMapper {
                 base_y: 100,
                 base_x_relative: 100.,
                 first_absolute: 0,
-                anchors: VecDeque::with_capacity(data.len() / self.bytes_per_anchor + 1),
+                anchors: VecDeque::with_capacity(data.len() / self.bytes_per_anchor + 2),
             }
         };
         let mut anchor_acc = self.bytes_per_anchor;
         let mut i = 0;
-        let mut cur_y = 0;
-        let mut cur_x = 0.;
+        let mut cur_y = -seg.base_y;
         let mut abs_x = offset == 0;
+        let mut cur_x = if abs_x { 0. } else { -seg.base_x_relative };
         while i < data.len() {
             let (c, adv) = decode_utf8(&data[i..]);
             let place_anchor = anchor_acc >= self.bytes_per_anchor;
@@ -241,12 +253,8 @@ impl LineMapper {
                 anchor_acc -= self.bytes_per_anchor;
                 seg.anchors.push_back(Anchor {
                     offset: offset + c_i as i64,
-                    y_offset: cur_y - seg.base_y,
-                    x_offset: if abs_x {
-                        cur_x
-                    } else {
-                        cur_x - seg.base_x_relative
-                    },
+                    y_offset: cur_y,
+                    x_offset: cur_x,
                 });
                 if !abs_x {
                     seg.first_absolute += 1;
@@ -266,12 +274,8 @@ impl LineMapper {
         if anchor_acc != 0 {
             seg.anchors.push_back(Anchor {
                 offset: end,
-                y_offset: cur_y - seg.base_y,
-                x_offset: if abs_x {
-                    cur_x
-                } else {
-                    cur_x - seg.base_x_relative
-                },
+                y_offset: cur_y,
+                x_offset: cur_x,
             });
             if !abs_x {
                 seg.first_absolute += 1;
@@ -710,15 +714,46 @@ fn utf8_seq_len(b: u8) -> usize {
 
 /// Decode a single UTF-8 character from the given non-empty byte slice.
 /// Returns the length of the character.
+/// If given malformed UTF-8 it may not raise an error but produce incorrect
+/// results.
 pub fn decode_utf8(b: &[u8]) -> (Result<char, u8>, usize) {
+    assert!(!b.is_empty());
     let len = utf8_seq_len(b[0]);
     if b.len() < len {
         return (Err(b[0]), 1);
     }
-    match std::str::from_utf8(&b[..len]) {
-        Ok(s) if !s.is_empty() => (Ok(s.chars().next().unwrap()), len),
-        _ => (Err(b[0]), 1),
-    }
+    let c = match len {
+        1 => b[0] as char,
+        // SAFETY: From the standard library docs:
+        // A char is a ‘Unicode scalar value’, which is any ‘Unicode code point’ other than a
+        // surrogate code point. This has a fixed numerical definition: code points are in the
+        // range 0 to 0x10FFFF, inclusive. Surrogate code points, used by UTF-16, are in the range
+        // 0xD800 to 0xDFFF.
+        // Because the resulting `u32` only has at most the lowest 11 bits set, it never reaches
+        // into the invalid range (it is always in the range 0x000 - 0x7FF)
+        2 => unsafe {
+            mem::transmute((b[0] as u32 & 0b0001_1111) << 6 | (b[1] as u32 & 0b0011_1111))
+        },
+        3 => match char::from_u32(
+            (b[0] as u32 & 0b1111) << 12
+                | (b[1] as u32 & 0b0011_1111) << 6
+                | (b[2] as u32 & 0b0011_1111),
+        ) {
+            Some(c) => c,
+            None => return (Err(b[0]), 1),
+        },
+        4 => match char::from_u32(
+            (b[0] as u32 & 0b0111) << 18
+                | (b[1] as u32 & 0b0011_1111) << 12
+                | (b[2] as u32 & 0b0011_1111) << 6
+                | (b[3] as u32 & 0b0011_1111),
+        ) {
+            Some(c) => c,
+            None => return (Err(b[0]), 1),
+        },
+        _ => return (Err(b[0]), 1),
+    };
+    (Ok(c), len)
 }
 
 #[derive(Clone, Copy, Debug)]
