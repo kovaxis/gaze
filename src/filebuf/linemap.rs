@@ -112,9 +112,9 @@ impl LineMap {
             // lines it would involve a large amount of dizzy moving text
             return None;
         }
-        let y = base.y(s.base_y) + dy;
-        let x0 = base.x(s.base_x_relative, is_x_abs) + dx.0;
-        let x1 = base.x(s.base_x_relative, is_x_abs) + dx.1;
+        let y = base.y(s) + dy;
+        let x0 = base.x_with(s.base_x_relative, is_x_abs) + dx.0;
+        let x1 = base.x_with(s.base_x_relative, is_x_abs) + dx.1;
         let lo = s.locate_lower(y, x0);
         let hi = s.locate_upper(y, x1);
         Some([lo, hi, base])
@@ -335,11 +335,8 @@ impl LineMapper {
                 // start anchor of the next segment
                 let og_ldst_len = ldst.anchors.len();
                 let dst_end_anchor = ldst.anchors.pop_back().unwrap();
-                let end_y = dst_end_anchor.y(ldst.base_y);
-                let end_x = dst_end_anchor.x(
-                    ldst.base_x_relative,
-                    ldst.first_absolute <= ldst.anchors.len(),
-                );
+                let end_y = dst_end_anchor.y(ldst);
+                let end_x = dst_end_anchor.x(ldst);
                 // Map the absolute index from the right segment to the left segment
                 let og_src_first_absolute = rsrc.first_absolute;
                 if ldst.first_absolute >= og_ldst_len {
@@ -659,8 +656,8 @@ impl MappedSegment {
             .map(|a| a.offset)
             .unwrap_or(self.end + 1);
         match self.anchors.partition_point(|a| {
-            a.y(self.base_y) < y
-                || a.y(self.base_y) == y && a.x(self.base_x_relative, a.offset >= rel_offset) <= x
+            a.y(self) < y
+                || a.y(self) == y && a.x_with(self.base_x_relative, a.offset >= rel_offset) <= x
         }) {
             0 => self.anchors[0],
             i => self.anchors[i - 1],
@@ -680,9 +677,8 @@ impl MappedSegment {
         *self
             .anchors
             .get(self.anchors.partition_point(|a| {
-                a.y(self.base_y) < y
-                    || a.y(self.base_y) == y
-                        && a.x(self.base_x_relative, a.offset >= rel_offset) < x
+                a.y(self) < y
+                    || a.y(self) == y && a.x_with(self.base_x_relative, a.offset >= rel_offset) < x
             }))
             .unwrap_or(self.anchors.back().unwrap())
     }
@@ -776,7 +772,11 @@ impl Anchor {
         self.x_offset
     }
 
-    pub fn x(&self, base_x: f64, is_abs: bool) -> f64 {
+    pub fn x(&self, s: &MappedSegment) -> f64 {
+        self.x_with(s.base_x_relative, s.is_x_absolute(*self))
+    }
+
+    pub fn x_with(&self, base_x: f64, is_abs: bool) -> f64 {
         if is_abs {
             self.x_offset
         } else {
@@ -784,7 +784,11 @@ impl Anchor {
         }
     }
 
-    pub fn y(&self, base_y: i64) -> i64 {
+    pub fn y(&self, s: &MappedSegment) -> i64 {
+        self.y_with(s.base_y)
+    }
+
+    pub fn y_with(&self, base_y: i64) -> i64 {
         self.y_offset + base_y
     }
 }

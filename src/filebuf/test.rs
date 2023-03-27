@@ -56,22 +56,10 @@ fn assert_linemap_segs_eq(t: &TestInst, segs: Vec<SegSpec>) {
                 assert!(got.anchors[got.first_absolute - 1].offset < ex.abs_x_since);
             }
         }
-        assert_eq!(
-            got.anchors
-                .front()
-                .unwrap()
-                .x(got.base_x_relative, got.first_absolute <= 0),
-            ex.start_x
-        );
-        assert_eq!(
-            got.anchors.back().unwrap().x(
-                got.base_x_relative,
-                got.first_absolute <= got.anchors.len() - 1
-            ),
-            ex.end_x
-        );
-        assert_eq!(got.anchors.front().unwrap().y(got.base_y), ex.start_y);
-        assert_eq!(got.anchors.back().unwrap().y(got.base_y), ex.end_y);
+        assert_eq!(got.anchors.front().unwrap().x(got), ex.start_x);
+        assert_eq!(got.anchors.back().unwrap().x(got), ex.end_x);
+        assert_eq!(got.anchors.front().unwrap().y(got), ex.start_y);
+        assert_eq!(got.anchors.back().unwrap().y(got), ex.end_y);
     }
 }
 

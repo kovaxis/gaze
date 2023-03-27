@@ -202,11 +202,12 @@ impl FileManager {
         let lmap_start = Instant::now();
         self.shared
             .linemapper
-            .process_data(&self.shared.loaded, offset, &self.read_buf);
+            .process_data(&self.shared.loaded, offset, &self.read_buf[..len]);
 
         let data_start = Instant::now();
         if store_data {
-            let read_buf = mem::take(&mut self.read_buf);
+            let mut read_buf = mem::take(&mut self.read_buf);
+            read_buf.truncate(len);
             SparseData::insert_data(&self.shared.loaded, offset, read_buf);
         }
 
@@ -231,8 +232,27 @@ impl FileManager {
                 );
             }
             if self.shared.k.log.segment_details {
-                eprintln!("  new sparse segments: {:?}", loaded.data);
-                eprintln!("  new linemap segments: {:?}", loaded.linemap);
+                eprintln!("  new sparse segments:");
+                for s in loaded.data.segments.iter() {
+                    eprintln!("    [{}, {})", s.offset, s.offset + s.data.len() as i64);
+                }
+                eprintln!("  new linemap segments:");
+                for s in loaded.linemap.segments.iter() {
+                    let start = s.anchors.front().unwrap();
+                    let end = s.anchors.back().unwrap();
+                    eprintln!(
+                        "    [{}, {}) from {}:{} to {}:{}",
+                        s.start,
+                        s.end,
+                        start.y(s),
+                        start.x(s),
+                        end.y(s),
+                        end.x(s),
+                    );
+                    for a in s.anchors.iter() {
+                        eprintln!("      {} at {}:{}", a.offset, a.y(s), a.x(s));
+                    }
+                }
             }
         }
         Ok(())
