@@ -229,12 +229,18 @@ fn main() -> Result<()> {
                         _ => {}
                     },
                     WindowEvent::MouseWheel { delta, .. } => {
-                        let d = match delta {
+                        let mut d = match delta {
                             MouseScrollDelta::LineDelta(x, y) => dvec2(-x as f64, -y as f64),
                             MouseScrollDelta::PixelDelta(d) => {
                                 state.pixel_to_lines(dvec2(-d.x, -d.y))
                             }
                         };
+                        if state.k.ui.invert_wheel_x {
+                            d.x *= -1.;
+                        }
+                        if state.k.ui.invert_wheel_y {
+                            d.y *= -1.;
+                        }
                         state.scroll.pos.delta_x += d.x;
                         state.scroll.pos.delta_y += d.y;
                         state.redraw();
@@ -250,25 +256,35 @@ fn main() -> Result<()> {
                                 MouseButton::Left => {
                                     let pos = state.last_mouse_pos.as_vec2();
                                     let (w, h) = state.last_size;
+                                    let (byp, bys) =
+                                        state.scroll.y_scrollbar_bounds(&state.k, w, h);
+                                    let (bxp, bxs) =
+                                        state.scroll.x_scrollbar_bounds(&state.k, w, h);
                                     let (yp, ys) =
                                         state.scroll.y_scrollhandle_bounds(&state.k, w, h);
                                     let (xp, xs) =
                                         state.scroll.x_scrollhandle_bounds(&state.k, w, h);
-                                    if pos.x >= yp.x
-                                        && pos.x < yp.x + ys.x
-                                        && pos.y >= yp.y
-                                        && pos.y < yp.y + ys.y
+                                    if pos.x >= byp.x
+                                        && pos.x < byp.x + bys.x
+                                        && pos.y >= byp.y
+                                        && pos.y < byp.y + bys.y
                                     {
                                         // Start dragging through vertical scrollbar
-                                        let cut = (pos.y - yp.y) / ys.y;
+                                        let mut cut = (pos.y - yp.y) / ys.y;
+                                        if !state.k.ui.drag_scrollbar {
+                                            cut = cut.clamp(0., 1.);
+                                        }
                                         state.drag = Drag::ScrollbarY { cut };
-                                    } else if pos.x >= xp.x
-                                        && pos.x <= xp.x + xs.x
-                                        && pos.y >= xp.y
-                                        && pos.y < xp.y + xs.y
+                                    } else if pos.x >= bxp.x
+                                        && pos.x <= bxp.x + bxs.x
+                                        && pos.y >= bxp.y
+                                        && pos.y < bxp.y + bxs.y
                                     {
                                         // Start dragging through horizontal scrollbar
-                                        let cut = (pos.x - xp.x) / xs.x;
+                                        let mut cut = (pos.x - xp.x) / xs.x;
+                                        if !state.k.ui.drag_scrollbar {
+                                            cut = cut.clamp(0., 1.);
+                                        }
                                         state.drag = Drag::ScrollbarX { cut };
                                     }
                                 }

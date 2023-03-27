@@ -2,6 +2,14 @@ use crate::prelude::*;
 
 const CFG_PATH: &str = "gaze.conf";
 const DEFAULT_CFG: &str = r#"
+[ui]
+# Invert the vertical scrolling direction when scrolling with the mouse/trackpad wheel.
+invert_wheel_y = false
+# Invert the horizontal scrolling direction when scrolling with the mouse/trackpad wheel.
+invert_wheel_x = false
+# Modifies the behaviour when clicking on the scrollbar but outside the scrollbar handle.
+drag_scrollbar = false
+
 [visual]
 # Height in pixels of a line of text.
 font_height = 20
@@ -91,11 +99,19 @@ pub struct FileLoading {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct Ui {
+    pub invert_wheel_x: bool,
+    pub invert_wheel_y: bool,
+    pub drag_scrollbar: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Cfg {
     #[serde(rename = "visual")]
     pub g: Visual,
     #[serde(rename = "file")]
     pub f: FileLoading,
+    pub ui: Ui,
     pub log: Log,
 }
 impl Default for Cfg {
