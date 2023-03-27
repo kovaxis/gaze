@@ -76,21 +76,87 @@ impl ScrollManager {
     }
 
     /// Get the scrollbar rect as origin and size.
-    fn scrollbar_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
+    fn y_scrollbar_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
         (
             vec2(w as f32 - k.g.scrollbar_width, 0.),
-            vec2(k.g.scrollbar_width, h as f32),
+            vec2(k.g.scrollbar_width, h as f32 - k.g.scrollbar_width),
         )
     }
 
     /// Get the scrollhandle rect as origin and size.
-    fn scrollhandle_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
-        let sh = (self.hcoef() as f32 * h as f32).max(k.g.scrollhandle_min_size);
-        let sy = self.ycoef() as f32 * (h as f32 - sh);
+    fn y_scrollhandle_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
+        let (p, s) = self.y_scrollbar_bounds(k, w, h);
+        let sh = (self.hcoef() as f32 * s.y).max(k.g.scrollhandle_min_size);
+        let sy = self.ycoef() as f32 * (s.y - sh);
+        (vec2(p.x, p.y + sy), vec2(s.x, sh))
+    }
+
+    /// Compute a float value between 0 and 1 indicating where along
+    /// the file is the current horizontal scroll
+    fn xcoef(&self) -> f32 {
+        let mut xcoef =
+            (self.pos.delta_x - self.last_bounds.corner.delta_x) / self.last_bounds.size.x;
+        if xcoef.is_nan() || xcoef < 0. {
+            xcoef = 0.;
+        } else if xcoef > 1. {
+            xcoef = 1.;
+        }
+        xcoef as f32
+    }
+
+    /// Compute a float representing the fraction of the file that the screen takes up.
+    /// Note that the scrollhandle may be larger if a lower limit is reached.
+    fn wcoef(&self) -> f32 {
+        let mut wcoef = self.last_view.size.x / self.last_bounds.size.x;
+        if wcoef.is_nan() || wcoef > 1. {
+            wcoef = 1.;
+        }
+        wcoef as f32
+    }
+
+    /// Get the scrollbar rect as origin and size.
+    fn x_scrollbar_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
         (
-            vec2(w as f32 - k.g.scrollbar_width, sy),
-            vec2(k.g.scrollbar_width, sh),
+            vec2(0., h as f32 - k.g.scrollbar_width),
+            vec2(w as f32 - k.g.scrollbar_width, k.g.scrollbar_width),
         )
+    }
+
+    /// Get the scrollhandle rect as origin and size.
+    fn x_scrollhandle_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
+        let (p, s) = self.x_scrollbar_bounds(k, w, h);
+        let sw = (self.wcoef() as f32 * s.x).max(k.g.scrollhandle_min_size);
+        let sx = self.xcoef() as f32 * (s.x - sw);
+        (vec2(p.x + sx, p.y), vec2(sw, s.y))
+    }
+}
+
+enum Drag {
+    None,
+    Grab {
+        screen_base: DVec2,
+        scroll_base: ScrollPos,
+    },
+    ScrollbarY {
+        cut: f32,
+    },
+    ScrollbarX {
+        cut: f32,
+    },
+}
+impl Drag {
+    fn is_none(&self) -> bool {
+        match self {
+            Drag::None => true,
+            _ => false,
+        }
+    }
+
+    fn is_scrollbar(&self) -> bool {
+        match self {
+            Drag::ScrollbarX { .. } | Drag::ScrollbarY { .. } => true,
+            _ => false,
+        }
     }
 }
 
@@ -99,8 +165,7 @@ pub struct WindowState {
     draw: DrawState,
     file: Option<FileBuffer>,
     k: Cfg,
-    scroll_drag: Option<(DVec2, ScrollPos)>,
-    scrollbar_drag: Option<f32>,
+    drag: Drag,
     last_mouse_pos: DVec2,
     last_size: (u32, u32),
     focused: bool,
@@ -143,8 +208,7 @@ fn main() -> Result<()> {
         )?),
         k,
         scroll: default(),
-        scroll_drag: None,
-        scrollbar_drag: None,
+        drag: Drag::None,
         last_mouse_pos: DVec2::ZERO,
         last_size: (1, 1),
         focused: false,
@@ -179,60 +243,91 @@ fn main() -> Result<()> {
                         state: st, button, ..
                     } => {
                         let down = state2bool(st);
-                        match button {
-                            MouseButton::Left => {
-                                if down {
-                                    let (p, s) = state.scroll.scrollhandle_bounds(
-                                        &state.k,
-                                        state.last_size.0,
-                                        state.last_size.1,
-                                    );
+                        if !down {
+                            state.drag = Drag::None;
+                        } else if state.drag.is_none() {
+                            match button {
+                                MouseButton::Left => {
                                     let pos = state.last_mouse_pos.as_vec2();
-                                    if pos.x >= p.x
-                                        && pos.x < p.x + s.x
-                                        && pos.y >= p.y
-                                        && pos.y < p.y + s.y
+                                    let (w, h) = state.last_size;
+                                    let (yp, ys) =
+                                        state.scroll.y_scrollhandle_bounds(&state.k, w, h);
+                                    let (xp, xs) =
+                                        state.scroll.x_scrollhandle_bounds(&state.k, w, h);
+                                    if pos.x >= yp.x
+                                        && pos.x < yp.x + ys.x
+                                        && pos.y >= yp.y
+                                        && pos.y < yp.y + ys.y
                                     {
-                                        // Start dragging through scrollbar
-                                        let cut = (pos.y - p.y) / s.y;
-                                        state.scrollbar_drag.get_or_insert(cut);
+                                        // Start dragging through vertical scrollbar
+                                        let cut = (pos.y - yp.y) / ys.y;
+                                        state.drag = Drag::ScrollbarY { cut };
+                                    } else if pos.x >= xp.x
+                                        && pos.x <= xp.x + xs.x
+                                        && pos.y >= xp.y
+                                        && pos.y < xp.y + xs.y
+                                    {
+                                        // Start dragging through horizontal scrollbar
+                                        let cut = (pos.x - xp.x) / xs.x;
+                                        state.drag = Drag::ScrollbarX { cut };
                                     }
-                                } else {
-                                    state.scrollbar_drag = None;
                                 }
-                            }
-                            MouseButton::Right => {
-                                if down {
-                                    state
-                                        .scroll_drag
-                                        .get_or_insert((state.last_mouse_pos, state.scroll.pos));
-                                } else {
-                                    state.scroll_drag = None;
+                                MouseButton::Right => {
+                                    state.drag = Drag::Grab {
+                                        screen_base: state.last_mouse_pos,
+                                        scroll_base: state.scroll.pos,
+                                    };
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
                     WindowEvent::CursorMoved { position, .. } => {
                         let pos = dvec2(position.x, position.y);
-                        if let Some(cut) = state.scrollbar_drag {
-                            let (w, h) = state.last_size;
-                            let (_p, s) = state.scroll.scrollhandle_bounds(&state.k, w, h);
-                            // Coefficient between 0 and 1
-                            let mut y = (pos.y as f32 - s.y * cut) / (h as f32 - s.y);
-                            if y.is_nan() || y < 0. {
-                                y = 0.;
-                            } else if y > 1. {
-                                y = 1.;
+                        match &state.drag {
+                            Drag::None => {}
+                            &Drag::Grab {
+                                screen_base,
+                                scroll_base,
+                            } => {
+                                let d = state.pixel_to_lines(screen_base - pos);
+                                state.scroll.pos.delta_x = scroll_base.delta_x + d.x;
+                                state.scroll.pos.delta_y = scroll_base.delta_y + d.y;
+                                state.redraw();
                             }
-                            state.scroll.pos.delta_y = state.scroll.last_bounds.corner.delta_y
-                                + state.scroll.last_bounds.size.y * y as f64;
-                            state.redraw();
-                        } else if let Some((ogpos, ogscr)) = state.scroll_drag {
-                            let d = state.pixel_to_lines(ogpos - pos);
-                            state.scroll.pos.delta_x = ogscr.delta_x + d.x;
-                            state.scroll.pos.delta_y = ogscr.delta_y + d.y;
-                            state.redraw();
+                            &Drag::ScrollbarY { cut } => {
+                                let (w, h) = state.last_size;
+                                let (bp, bs) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
+                                let (_p, s) = state.scroll.y_scrollhandle_bounds(&state.k, w, h);
+                                // Coefficient between 0 and 1
+                                let mut y = (pos.y as f32 - s.y * cut - bp.y) / (bs.y - s.y);
+                                if y.is_nan() || y < 0. {
+                                    y = 0.;
+                                } else if y > 1. {
+                                    y = 1.;
+                                }
+                                state.scroll.pos.delta_y = state.scroll.last_bounds.corner.delta_y
+                                    + state.scroll.last_bounds.size.y * y as f64;
+                                state.redraw();
+                            }
+                            &Drag::ScrollbarX { cut } => {
+                                let (w, h) = state.last_size;
+                                let (bp, bs) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
+                                let (_p, s) = state.scroll.x_scrollhandle_bounds(&state.k, w, h);
+                                // Coefficient between 0 and 1
+                                let mut x = (pos.x as f32 - s.x * cut - bp.x) / (bs.x - s.x);
+                                if x.is_nan() || x < 0. {
+                                    x = 0.;
+                                } else if x > 1. {
+                                    x = 1.;
+                                }
+                                if state.scroll.last_bounds.size.x.is_finite() {
+                                    state.scroll.pos.delta_x =
+                                        state.scroll.last_bounds.corner.delta_x
+                                            + state.scroll.last_bounds.size.x * x as f64;
+                                }
+                                state.redraw();
+                            }
                         }
                         state.last_mouse_pos = pos;
                     }

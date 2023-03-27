@@ -245,7 +245,10 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
                 h as f64 / state.k.g.font_height as f64,
             ),
         };
-        if state.scrollbar_drag.is_none() {
+        // Only update bounds if not dragging the scrollbar
+        // This makes the scrollbar-drag experience much smoother
+        // while the file is still being loaded
+        if !state.drag.is_scrollbar() {
             state.scroll.last_bounds = scroll_bounds;
         }
         // Iterate over all characters on the screen and queue them up for rendering
@@ -370,9 +373,9 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         },
     )?;
 
-    // Draw the scrollbar background
+    // Draw the vertical scrollbar background
     {
-        let (p, s) = state.scroll.scrollbar_bounds(&state.k, w, h);
+        let (p, s) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
         let mvp = mvp
             * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
         frame.draw(
@@ -392,9 +395,55 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         )?;
     }
 
-    // Draw the scrollbar handle
+    // Draw the vertical scrollbar handle
     {
-        let (p, s) = state.scroll.scrollhandle_bounds(&state.k, w, h);
+        let (p, s) = state.scroll.y_scrollhandle_bounds(&state.k, w, h);
+        // Position handle in pixels
+        let mvp = mvp
+            * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
+        // Execute scroll handle drawcall
+        frame.draw(
+            &state.draw.box_vbo,
+            IndicesSource::NoIndices {
+                primitives: PrimitiveType::TrianglesList,
+            },
+            &state.draw.flat_shader,
+            &gl::glium::uniform! {
+                tint: state.k.g.scrollhandle_color.map(|c| c as f32 * (1./255.)),
+                mvp: mvp.to_cols_array_2d(),
+            },
+            &DrawParameters {
+                blend: Blend::alpha_blending(),
+                ..default()
+            },
+        )?;
+    }
+
+    // Draw the horizontal scrollbar background
+    {
+        let (p, s) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
+        let mvp = mvp
+            * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
+        frame.draw(
+            &state.draw.box_vbo,
+            IndicesSource::NoIndices {
+                primitives: PrimitiveType::TrianglesList,
+            },
+            &state.draw.flat_shader,
+            &gl::glium::uniform! {
+                tint: state.k.g.scrollbar_color.map(|c| c as f32 * (1./255.)),
+                mvp: mvp.to_cols_array_2d(),
+            },
+            &DrawParameters {
+                blend: Blend::alpha_blending(),
+                ..default()
+            },
+        )?;
+    }
+
+    // Draw the horizontal scrollbar handle
+    {
+        let (p, s) = state.scroll.x_scrollhandle_bounds(&state.k, w, h);
         // Position handle in pixels
         let mvp = mvp
             * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
