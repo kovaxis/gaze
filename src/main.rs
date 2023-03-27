@@ -55,8 +55,8 @@ impl ScrollManager {
     /// Compute a float value between 0 and 1 indicating where along
     /// the file is the current vertical scroll
     fn ycoef(&self) -> f32 {
-        let mut ycoef = (self.pos.delta_y - self.last_bounds.corner.delta_y)
-            / (self.last_bounds.size.y - self.last_view.size.y);
+        let mut ycoef =
+            (self.pos.delta_y - self.last_bounds.corner.delta_y) / self.last_bounds.size.y;
         if ycoef.is_nan() || ycoef < 0. {
             ycoef = 0.;
         } else if ycoef > 1. {
@@ -226,8 +226,7 @@ fn main() -> Result<()> {
                                 y = 1.;
                             }
                             state.scroll.pos.delta_y = state.scroll.last_bounds.corner.delta_y
-                                + (state.scroll.last_bounds.size.y - state.scroll.last_view.size.y)
-                                    * y as f64;
+                                + state.scroll.last_bounds.size.y * y as f64;
                             state.redraw();
                         } else if let Some((ogpos, ogscr)) = state.scroll_drag {
                             let d = state.pixel_to_lines(ogpos - pos);
