@@ -3,6 +3,7 @@ use ab_glyph::{Font, Glyph};
 use gl::glium::{
     index::{IndicesSource, PrimitiveType},
     uniforms::{MagnifySamplerFilter, MinifySamplerFilter, Uniforms},
+    vertex::VertexBufferSlice,
     Blend, DrawParameters, Frame, Program, Surface, Texture2d, VertexBuffer,
 };
 use glyph_brush_draw_cache::DrawCache;
@@ -31,25 +32,90 @@ gl::glium::implement_vertex!(TextVertex,
     color normalize(true)
 );
 
-struct TextScope {
-    queue: Vec<Glyph>,
-    vertex_buf: Vec<TextVertex>,
-    vbo: VertexBuffer<TextVertex>,
+struct VertexBuf<T: Copy> {
+    buf: Vec<T>,
+    vbo: VertexBuffer<T>,
     vbo_len: usize,
 }
-impl TextScope {
+impl<T: Copy + gl::glium::Vertex> VertexBuf<T> {
     fn new(display: &Display) -> Result<Self> {
         Ok(Self {
-            queue: default(),
-            vertex_buf: default(),
+            buf: default(),
             vbo: VertexBuffer::empty_dynamic(display, 1024)?,
             vbo_len: 0,
         })
     }
 
     fn clear(&mut self) {
+        self.buf.clear();
+        self.vbo_len = 0;
+    }
+
+    fn push(&mut self, v: T) {
+        self.buf.push(v);
+    }
+
+    fn upload(&mut self, display: &Display) -> Result<()> {
+        let verts = &self.buf[..];
+        if verts.len() > self.vbo.len() {
+            self.vbo = VertexBuffer::empty_dynamic(display, verts.len().next_power_of_two())?;
+        }
+        if !verts.is_empty() {
+            self.vbo.slice(0..verts.len()).unwrap().write(verts);
+        }
+        self.vbo_len = verts.len();
+        Ok(())
+    }
+
+    fn vbo(&self) -> VertexBufferSlice<T> {
+        self.vbo.slice(..self.vbo_len).unwrap()
+    }
+}
+impl VertexBuf<FlatVertex> {
+    fn push_quad(&mut self, corner: Vec2, size: Vec2, color: [u8; 4]) {
+        let (o, x, y) = (corner, vec2(size.x, 0.), vec2(0., size.y));
+        self.push(FlatVertex {
+            pos: o.to_array(),
+            color,
+        });
+        self.push(FlatVertex {
+            pos: (o + x).to_array(),
+            color,
+        });
+        self.push(FlatVertex {
+            pos: (o + x + y).to_array(),
+            color,
+        });
+        self.push(FlatVertex {
+            pos: o.to_array(),
+            color,
+        });
+        self.push(FlatVertex {
+            pos: (o + x + y).to_array(),
+            color,
+        });
+        self.push(FlatVertex {
+            pos: (o + y).to_array(),
+            color,
+        });
+    }
+}
+
+struct TextScope {
+    queue: Vec<Glyph>,
+    buf: VertexBuf<TextVertex>,
+}
+impl TextScope {
+    fn new(display: &Display) -> Result<Self> {
+        Ok(Self {
+            queue: default(),
+            buf: VertexBuf::new(display)?,
+        })
+    }
+
+    fn clear(&mut self) {
         self.queue.clear();
-        self.vertex_buf.clear();
+        self.buf.clear();
     }
 
     fn push(&mut self, cache: &mut DrawCache, g: Glyph) {
@@ -68,7 +134,7 @@ impl TextScope {
             if let Some((tex, pos)) = cache.rect_for(0, g) {
                 macro_rules! vert {
                     ($x:ident, $y:ident) => {{
-                        self.vertex_buf.push(TextVertex {
+                        self.buf.push(TextVertex {
                             pos: [pos.$x.x, pos.$y.y],
                             uv: [tex.$x.x, tex.$y.y],
                             color,
@@ -85,14 +151,7 @@ impl TextScope {
         }
 
         // Upload the vertices
-        let verts = &self.vertex_buf[..];
-        if verts.len() > self.vbo.len() {
-            self.vbo = VertexBuffer::empty_dynamic(display, verts.len().next_power_of_two())?;
-        }
-        if !verts.is_empty() {
-            self.vbo.slice(0..verts.len()).unwrap().write(verts);
-        }
-        self.vbo_len = verts.len();
+        self.buf.upload(display)?;
 
         Ok(())
     }
@@ -105,7 +164,7 @@ impl TextScope {
         draw_params: &DrawParameters,
     ) -> Result<()> {
         frame.draw(
-            self.vbo.slice(0..self.vbo_len).unwrap(),
+            self.buf.vbo(),
             IndicesSource::NoIndices {
                 primitives: PrimitiveType::TrianglesList,
             },
@@ -139,7 +198,7 @@ pub struct DrawState {
     linenums: TextScope,
     text_shader: Program,
     flat_shader: Program,
-    box_vbo: VertexBuffer<FlatVertex>,
+    aux_vbo: VertexBuf<FlatVertex>,
 }
 impl DrawState {
     pub fn new(display: &Display, font: &FontArc) -> Result<Self> {
@@ -155,21 +214,7 @@ impl DrawState {
             linenums: TextScope::new(display)?,
             text_shader: load_shader(display, "text")?,
             flat_shader: load_shader(display, "flat")?,
-            box_vbo: {
-                let vert = |x, y| FlatVertex {
-                    pos: [x, y],
-                    color: [255; 4],
-                };
-                let data = [
-                    vert(0., 0.),
-                    vert(1., 0.),
-                    vert(1., 1.),
-                    vert(0., 0.),
-                    vert(1., 1.),
-                    vert(0., 1.),
-                ];
-                VertexBuffer::new(display, &data)?
-            },
+            aux_vbo: VertexBuf::new(display)?,
         })
     }
 }
@@ -373,97 +418,72 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         },
     )?;
 
+    state.draw.aux_vbo.clear();
+
     // Draw the vertical scrollbar background
     {
         let (p, s) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
-        let mvp = mvp
-            * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
-        frame.draw(
-            &state.draw.box_vbo,
-            IndicesSource::NoIndices {
-                primitives: PrimitiveType::TrianglesList,
-            },
-            &state.draw.flat_shader,
-            &gl::glium::uniform! {
-                tint: state.k.g.scrollbar_color.map(|c| c as f32 * (1./255.)),
-                mvp: mvp.to_cols_array_2d(),
-            },
-            &DrawParameters {
-                blend: Blend::alpha_blending(),
-                ..default()
-            },
-        )?;
+        state
+            .draw
+            .aux_vbo
+            .push_quad(p, s, state.k.g.scrollbar_color);
     }
 
     // Draw the vertical scrollbar handle
     {
         let (p, s) = state.scroll.y_scrollhandle_bounds(&state.k, w, h);
-        // Position handle in pixels
-        let mvp = mvp
-            * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
-        // Execute scroll handle drawcall
-        frame.draw(
-            &state.draw.box_vbo,
-            IndicesSource::NoIndices {
-                primitives: PrimitiveType::TrianglesList,
-            },
-            &state.draw.flat_shader,
-            &gl::glium::uniform! {
-                tint: state.k.g.scrollhandle_color.map(|c| c as f32 * (1./255.)),
-                mvp: mvp.to_cols_array_2d(),
-            },
-            &DrawParameters {
-                blend: Blend::alpha_blending(),
-                ..default()
-            },
-        )?;
+        state
+            .draw
+            .aux_vbo
+            .push_quad(p, s, state.k.g.scrollhandle_color);
     }
 
     // Draw the horizontal scrollbar background
     {
         let (p, s) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
-        let mvp = mvp
-            * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
-        frame.draw(
-            &state.draw.box_vbo,
-            IndicesSource::NoIndices {
-                primitives: PrimitiveType::TrianglesList,
-            },
-            &state.draw.flat_shader,
-            &gl::glium::uniform! {
-                tint: state.k.g.scrollbar_color.map(|c| c as f32 * (1./255.)),
-                mvp: mvp.to_cols_array_2d(),
-            },
-            &DrawParameters {
-                blend: Blend::alpha_blending(),
-                ..default()
-            },
-        )?;
+        state
+            .draw
+            .aux_vbo
+            .push_quad(p, s, state.k.g.scrollbar_color);
     }
 
     // Draw the horizontal scrollbar handle
     {
         let (p, s) = state.scroll.x_scrollhandle_bounds(&state.k, w, h);
-        // Position handle in pixels
-        let mvp = mvp
-            * (Mat4::from_translation(vec3(p.x, p.y, 0.)) * Mat4::from_scale(vec3(s.x, s.y, 1.)));
-        // Execute scroll handle drawcall
-        frame.draw(
-            &state.draw.box_vbo,
-            IndicesSource::NoIndices {
-                primitives: PrimitiveType::TrianglesList,
-            },
-            &state.draw.flat_shader,
-            &gl::glium::uniform! {
-                tint: state.k.g.scrollhandle_color.map(|c| c as f32 * (1./255.)),
-                mvp: mvp.to_cols_array_2d(),
-            },
-            &DrawParameters {
-                blend: Blend::alpha_blending(),
-                ..default()
-            },
-        )?;
+        state
+            .draw
+            .aux_vbo
+            .push_quad(p, s, state.k.g.scrollhandle_color);
     }
+
+    // Draw the scrollbar corner
+    {
+        let (yp, ys) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
+        let (xp, xs) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
+        state.draw.aux_vbo.push_quad(
+            vec2(yp.x, xp.y),
+            vec2(ys.x, xs.y),
+            state.k.g.scrollcorner_color,
+        );
+    }
+
+    // Draw the auxiliary decorations
+    state.draw.aux_vbo.upload(&state.display)?;
+    frame.draw(
+        state.draw.aux_vbo.vbo(),
+        IndicesSource::NoIndices {
+            primitives: PrimitiveType::TrianglesList,
+        },
+        &state.draw.flat_shader,
+        &gl::glium::uniform! {
+            tint: [1f32; 4],
+            mvp: mvp.to_cols_array_2d(),
+        },
+        &DrawParameters {
+            blend: Blend::alpha_blending(),
+            ..default()
+        },
+    )?;
 
     let preswap = Instant::now();
 

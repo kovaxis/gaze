@@ -17,6 +17,8 @@ text_color = [255, 255, 255, 255]
 bg_color = [3, 3, 4, 255]
 # Color of the scrollbar background.
 scrollbar_color = [10, 10, 10, 220]
+# Color of the corner square between the vertical and horizontal scrollbars
+scrollcorner_color = [15, 15, 15, 220]
 # Color of the scrollbar handle.
 scrollhandle_color = [150, 150, 150, 255]
 # Width of the scrollbar.
@@ -60,6 +62,7 @@ pub struct Visual {
     pub bg_color: [u8; 4],
     pub scrollbar_color: [u8; 4],
     pub scrollhandle_color: [u8; 4],
+    pub scrollcorner_color: [u8; 4],
     pub scrollbar_width: f32,
     pub scrollhandle_min_size: f32,
 }
