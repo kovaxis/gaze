@@ -98,6 +98,7 @@ pub struct Visual {
     pub text_color: [u8; 4],
     pub bg_color: [u8; 4],
     pub selection_color: [u8; 4],
+    pub selection_offset: f32,
     pub scrollbar_color: [u8; 4],
     pub scrollhandle_color: [u8; 4],
     pub scrollcorner_color: [u8; 4],

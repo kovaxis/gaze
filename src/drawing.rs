@@ -240,6 +240,7 @@ pub struct DrawState {
     texture: Texture2d,
     text: TextScope,
     linenums: TextScope,
+    sel_vbo: VertexBuf<FlatVertex>,
     text_shader: Program,
     flat_shader: Program,
     slide_icon: Vec<FlatVertex>,
@@ -257,6 +258,7 @@ impl DrawState {
             texture: Texture2d::empty(display, cache_size.0, cache_size.1)?,
             text: TextScope::new(display)?,
             linenums: TextScope::new(display)?,
+            sel_vbo: VertexBuf::new(display)?,
             text_shader: load_shader(display, "text")?,
             flat_shader: load_shader(display, "flat")?,
             slide_icon: VertexBuf::build_slide_icon(k),
@@ -317,12 +319,14 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
     let (w, h) = frame.get_dimensions();
     state.last_size = (w, h);
 
+    state.draw.text.clear();
+    state.draw.linenums.clear();
+    state.draw.sel_vbo.clear();
+    state.draw.aux_vbo.clear();
+
     // Go through file characters, queueing the text for rendering
     let prefile = Instant::now();
     let mut textqueue = Duration::ZERO;
-    state.draw.text.clear();
-    state.draw.linenums.clear();
-    state.draw.aux_vbo.clear();
     let mut all_loaded = true;
     if let Some(filebuf) = state.file.as_ref() {
         // Lock the shared file data
@@ -378,14 +382,16 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
                     // Draw previous selection box
                     let (y, x0, x1) = &mut sel_box;
                     if x1 > x0 {
-                        state.draw.aux_vbo.push_quad(
+                        state.draw.sel_vbo.push_quad(
                             vec2(*x0, *y),
                             vec2(*x1 - *x0, state.k.g.font_height),
                             state.k.g.selection_color,
                         );
                     }
-                    *y =
-                        p.y + (dy as f64 - state.scroll.pos.delta_y) as f32 * state.k.g.font_height;
+                    let y_off = (state.k.g.selection_offset * state.k.g.font_height).round();
+                    *y = p.y
+                        + (dy as f64 - state.scroll.pos.delta_y) as f32 * state.k.g.font_height
+                        + y_off;
                     *x0 = f32::INFINITY;
                     *x1 = f32::NEG_INFINITY;
                 }
@@ -422,7 +428,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         {
             let (y, x0, x1) = &sel_box;
             if x1 > x0 {
-                state.draw.aux_vbo.push_quad(
+                state.draw.sel_vbo.push_quad(
                     vec2(*x0, *y),
                     vec2(*x1 - *x0, state.k.g.font_height),
                     state.k.g.selection_color,
@@ -468,6 +474,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
     let preuploadvert = Instant::now();
 
     // Generate and upload the vertex data
+    state.draw.sel_vbo.upload(&state.display)?;
     state
         .draw
         .text
@@ -490,18 +497,35 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
             mvp: mvp.to_cols_array_2d(),
         };
         let (p, s) = state.k.file_view_bounds((w, h));
+        let scissor = Some(gl::glium::Rect {
+            left: p.x.ceil() as u32,
+            bottom: (h as f32 - (p.y + s.y)).ceil() as u32,
+            width: s.x.floor() as u32,
+            height: s.y.floor() as u32,
+        });
+        frame.draw(
+            state.draw.sel_vbo.vbo(),
+            IndicesSource::NoIndices {
+                primitives: PrimitiveType::TrianglesList,
+            },
+            &state.draw.flat_shader,
+            &gl::glium::uniform! {
+                tint: [1f32; 4],
+                mvp: mvp.to_cols_array_2d(),
+            },
+            &DrawParameters {
+                blend: Blend::alpha_blending(),
+                scissor,
+                ..default()
+            },
+        )?;
         state.draw.text.draw(
             &mut frame,
             &state.draw.text_shader,
             &uniforms,
             &DrawParameters {
                 blend: Blend::alpha_blending(),
-                scissor: Some(gl::glium::Rect {
-                    left: p.x.ceil() as u32,
-                    bottom: (h as f32 - (p.y + s.y)).ceil() as u32,
-                    width: s.x.floor() as u32,
-                    height: s.y.floor() as u32,
-                }),
+                scissor,
                 ..default()
             },
         )?;
