@@ -149,6 +149,13 @@ impl ScrollManager {
         let sx = self.xcoef() as f32 * (s.x - sw);
         (vec2(p.x + sx, p.y), vec2(sw, s.y))
     }
+
+    /// Convert a mouse cursor position to a file position, based on the last scroll and other factors.
+    pub fn screen_to_file_pos(&self, k: &Cfg, (w, h): (u32, u32), pos: DVec2) -> FilePos {
+        let (p, _s) = k.file_view_bounds((w, h));
+        let d = (pos.as_vec2() - vec2(0., k.g.selection_offset) - p) / k.g.font_height;
+        self.last_view.corner.offset(d.as_dvec2())
+    }
 }
 
 enum Drag {
@@ -293,11 +300,12 @@ impl WindowState {
         if button == self.k.ui.select_button {
             if down {
                 // Start selecting text
-                let (p, _s) = self.k.file_view_bounds(self.last_size);
-                let pos = (self.last_mouse_pos - p.as_dvec2()) / self.k.g.font_height as f64;
+                let pos =
+                    self.scroll
+                        .screen_to_file_pos(&self.k, self.last_size, self.last_mouse_pos);
                 self.selected = Selected {
-                    first: self.scroll.pos.offset(pos),
-                    second: self.scroll.pos.offset(pos),
+                    first: pos,
+                    second: pos,
                     second_set: false,
                 };
                 self.redraw();
@@ -379,11 +387,9 @@ impl WindowState {
         }
         // Tick selection moves
         if !self.selected.second_set {
-            let (p, _s) = self.k.file_view_bounds(self.last_size);
-            self.selected.second = self
-                .scroll
-                .pos
-                .offset((self.last_mouse_pos - p.as_dvec2()) / self.k.g.font_height as f64);
+            self.selected.second =
+                self.scroll
+                    .screen_to_file_pos(&self.k, self.last_size, self.last_mouse_pos);
             self.redraw();
         }
     }
@@ -427,6 +433,21 @@ impl WindowState {
                 WindowEvent::CursorMoved { position, .. } => {
                     let pos = dvec2(position.x, position.y);
                     self.tick_drag(pos);
+                    {
+                        use gl::winit::window::CursorIcon;
+                        let (p, s) = self.k.file_view_bounds(self.last_size);
+                        let pos = pos.as_vec2();
+                        let icon = if pos.x >= p.x
+                            && pos.x < p.x + s.x
+                            && pos.y >= p.y
+                            && pos.y < p.y + s.y
+                        {
+                            CursorIcon::Text
+                        } else {
+                            CursorIcon::Default
+                        };
+                        self.display.gl_window().window().set_cursor_icon(icon);
+                    }
                     self.last_mouse_pos = pos;
                 }
                 WindowEvent::Focused(f) => self.focused = f,
