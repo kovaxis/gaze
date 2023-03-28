@@ -3,12 +3,29 @@ use crate::prelude::*;
 const CFG_PATH: &str = "gaze.conf";
 const DEFAULT_CFG: &str = r#"
 [ui]
+# Grab button and hold
+# 1 is right click
+grab_button = { button = 1, hold = true }
 # Invert the vertical scrolling direction when scrolling with the mouse/trackpad wheel.
 invert_wheel_y = false
 # Invert the horizontal scrolling direction when scrolling with the mouse/trackpad wheel.
 invert_wheel_x = false
+# Scrollbar button and hold
+# 0 is left click
+scrollbar_button = { button = 0, hold = true }
 # Modifies the behaviour when clicking on the scrollbar but outside the scrollbar handle.
 drag_scrollbar = false
+# Slide button and hold
+# 2 is middle click
+slide_button = { button = 2, hold = false }
+# Pixels of dead area when sliding with the middle click
+slide_dead_area = 20
+# Base sliding speed, in lines per second
+slide_speed = 20
+# The base sliding speed is this amount of screensizes away from the center
+slide_base_dist = 0.10
+# Every this amount of screensizes the sliding speed is doubled
+slide_double_dist = 0.055
 
 [visual]
 # Height in pixels of a line of text.
@@ -33,6 +50,8 @@ scrollhandle_color = [150, 150, 150, 255]
 scrollbar_width = 18
 # Minimum height of the scrollbar handle.
 scrollhandle_min_size = 10
+# Icon shown while scroll-sliding.
+slide_icon = { radius = 24, detail = 20, bg = [255, 255, 255, 255], fg = [0, 0, 0, 255], arrow_shift = 14, arrow_size = 7 }
 
 [log]
 # Log the time that each rendering stage takes
@@ -60,6 +79,16 @@ load_radius = 1000000
 "#;
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct SlideIcon {
+    pub radius: f32,
+    pub detail: usize,
+    pub bg: [u8; 4],
+    pub fg: [u8; 4],
+    pub arrow_size: f32,
+    pub arrow_shift: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Visual {
     /// In pixels.
     pub font_height: f32,
@@ -73,6 +102,7 @@ pub struct Visual {
     pub scrollcorner_color: [u8; 4],
     pub scrollbar_width: f32,
     pub scrollhandle_min_size: f32,
+    pub slide_icon: SlideIcon,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -99,10 +129,23 @@ pub struct FileLoading {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct DragButton {
+    pub button: u16,
+    pub hold: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Ui {
     pub invert_wheel_x: bool,
     pub invert_wheel_y: bool,
+    pub grab_button: DragButton,
+    pub scrollbar_button: DragButton,
     pub drag_scrollbar: bool,
+    pub slide_button: DragButton,
+    pub slide_dead_area: f64,
+    pub slide_speed: f64,
+    pub slide_base_dist: f64,
+    pub slide_double_dist: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -164,7 +207,7 @@ impl Cfg {
                 }
             }
         }
-        let cfg = Self::default();
+        let default = Self::default();
         if let Some(save_path) = Self::near_exe() {
             if save_path.exists() {
                 println!(
@@ -172,7 +215,7 @@ impl Cfg {
                     save_path.display()
                 );
             } else {
-                match cfg.save_to(&save_path) {
+                match default.save_to(&save_path) {
                     Ok(()) => println!("saved default config to \"{}\"", save_path.display()),
                     Err(err) => println!(
                         "WARNING: could not save config to \"{}\": {:#}",
@@ -182,7 +225,7 @@ impl Cfg {
                 }
             }
         }
-        cfg
+        default
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {

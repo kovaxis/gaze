@@ -20,7 +20,7 @@ pub struct LoadedData {
     /// seek large files quickly but also find precise characters quickly.
     pub linemap: LineMap,
     pub data: SparseData,
-    pub hot: ScrollRect,
+    pub hot: FileRect,
 }
 impl LoadedData {
     fn try_get_hot_range(&self) -> Option<(i64, i64, i64)> {
@@ -342,7 +342,7 @@ impl FileLock<'_> {
         }
     }
 
-    pub fn clamp_scroll(&mut self, scroll: &mut ScrollPos) -> ScrollRect {
+    pub fn clamp_scroll(&mut self, scroll: &mut FilePos) -> FileRect {
         let rect = self
             .filebuf
             .shared
@@ -361,7 +361,7 @@ impl FileLock<'_> {
     /// Returns whether the backend is idle or not.
     pub fn visit_rect(
         &mut self,
-        view: ScrollRect,
+        view: FileRect,
         mut on_char_or_line: impl FnMut(f64, i64, Option<char>),
     ) -> bool {
         let loaded = &mut *self.loaded;
@@ -455,7 +455,7 @@ impl FileLock<'_> {
 ///     without even knowing wether the file is all a single line or thousands of lines.
 ///     This is similar to a "go to line" feature.
 #[derive(Copy, Clone, PartialEq, Default)]
-pub struct ScrollPos {
+pub struct FilePos {
     /// A reference offset within the file.
     /// This offset is only modified when scrolling jaggedly (ie. jumping directly
     /// to a file offset).
@@ -466,10 +466,13 @@ pub struct ScrollPos {
     pub delta_y: f64,
 }
 
+/// Represents a rectangle of the file.
+/// Does **NOT** represent a linear start-end range, it literally represents
+/// a rectangle view into the file.
 #[derive(Copy, Clone, PartialEq, Default)]
-pub struct ScrollRect {
+pub struct FileRect {
     /// The top-left corner.
-    pub corner: ScrollPos,
+    pub corner: FilePos,
     /// The size of this view in line units.
     pub size: DVec2,
 }

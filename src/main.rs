@@ -1,7 +1,7 @@
 use crate::prelude::*;
 use cfg::Cfg;
 use drawing::DrawState;
-use filebuf::{ScrollPos, ScrollRect};
+use filebuf::{FilePos, FileRect};
 use gl::{
     glutin::event_loop::ControlFlow,
     winit::event::{ElementState, MouseButton, MouseScrollDelta},
@@ -47,9 +47,9 @@ mod filebuf;
 
 #[derive(Default)]
 struct ScrollManager {
-    pos: ScrollPos,
-    last_view: ScrollRect,
-    last_bounds: ScrollRect,
+    pos: FilePos,
+    last_view: FileRect,
+    last_bounds: FileRect,
 }
 impl ScrollManager {
     /// Compute a float value between 0 and 1 indicating where along
@@ -133,15 +133,19 @@ impl ScrollManager {
 
 enum Drag {
     None,
-    Grab {
-        screen_base: DVec2,
-        scroll_base: ScrollPos,
-    },
     ScrollbarY {
         cut: f32,
     },
     ScrollbarX {
         cut: f32,
+    },
+    Slide {
+        screen_base: DVec2,
+        last_update: Cell<Instant>,
+    },
+    Grab {
+        screen_base: DVec2,
+        scroll_base: FilePos,
     },
 }
 impl Drag {
@@ -158,6 +162,27 @@ impl Drag {
             _ => false,
         }
     }
+
+    fn requires_refresh(&self) -> bool {
+        match self {
+            Drag::Slide { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn hold(&self, k: &Cfg) -> bool {
+        match self {
+            Drag::ScrollbarX { .. } | Drag::ScrollbarY { .. } => k.ui.scrollbar_button.hold,
+            Drag::Grab { .. } => k.ui.grab_button.hold,
+            Drag::Slide { .. } => k.ui.slide_button.hold,
+            Drag::None => false,
+        }
+    }
+}
+
+struct Selecting {
+    first: FilePos,
+    second: FilePos,
 }
 
 pub struct WindowState {
@@ -166,6 +191,7 @@ pub struct WindowState {
     file: Option<FileBuffer>,
     k: Cfg,
     drag: Drag,
+    selecting: Option<Selecting>,
     last_mouse_pos: DVec2,
     last_size: (u32, u32),
     focused: bool,
@@ -179,6 +205,77 @@ impl WindowState {
     fn pixel_to_lines(&self, pix: DVec2) -> DVec2 {
         pix / self.k.g.font_height as f64
     }
+
+    fn tick_drag(&mut self, pos: DVec2) {
+        match &self.drag {
+            Drag::None => {}
+            Drag::Grab {
+                screen_base,
+                scroll_base,
+            } => {
+                let d = self.pixel_to_lines(*screen_base - pos);
+                self.scroll.pos.delta_x = scroll_base.delta_x + d.x;
+                self.scroll.pos.delta_y = scroll_base.delta_y + d.y;
+                self.redraw();
+            }
+            Drag::ScrollbarY { cut } => {
+                let (w, h) = self.last_size;
+                let (bp, bs) = self.scroll.y_scrollbar_bounds(&self.k, w, h);
+                let (_p, s) = self.scroll.y_scrollhandle_bounds(&self.k, w, h);
+                // Coefficient between 0 and 1
+                let mut y = (pos.y as f32 - s.y * *cut - bp.y) / (bs.y - s.y);
+                if y.is_nan() || y < 0. {
+                    y = 0.;
+                } else if y > 1. {
+                    y = 1.;
+                }
+                self.scroll.pos.delta_y = self.scroll.last_bounds.corner.delta_y
+                    + self.scroll.last_bounds.size.y * y as f64;
+                self.redraw();
+            }
+            Drag::ScrollbarX { cut } => {
+                let (w, h) = self.last_size;
+                let (bp, bs) = self.scroll.x_scrollbar_bounds(&self.k, w, h);
+                let (_p, s) = self.scroll.x_scrollhandle_bounds(&self.k, w, h);
+                // Coefficient between 0 and 1
+                let mut x = (pos.x as f32 - s.x * *cut - bp.x) / (bs.x - s.x);
+                if x.is_nan() || x < 0. {
+                    x = 0.;
+                } else if x > 1. {
+                    x = 1.;
+                }
+                if self.scroll.last_bounds.size.x.is_finite() {
+                    self.scroll.pos.delta_x = self.scroll.last_bounds.corner.delta_x
+                        + self.scroll.last_bounds.size.x * x as f64;
+                }
+                self.redraw();
+            }
+            Drag::Slide {
+                screen_base,
+                last_update,
+            } => {
+                let now = Instant::now();
+                let mut d = pos - *screen_base;
+                let s = self.last_size.0.min(self.last_size.1) as f64;
+                for k in 0..2 {
+                    if d[k].abs() > self.k.ui.slide_dead_area / 2. {
+                        d[k] = ((d[k].abs() / s - self.k.ui.slide_base_dist)
+                            / self.k.ui.slide_double_dist)
+                            .exp2()
+                            .copysign(d[k])
+                            * self.k.ui.slide_speed;
+                    } else {
+                        d[k] = 0.;
+                    }
+                }
+                d *= (now - last_update.get()).as_secs_f64();
+                last_update.set(now);
+                self.scroll.pos.delta_x += d.x;
+                self.scroll.pos.delta_y += d.y;
+                self.redraw();
+            }
+        }
+    }
 }
 
 fn state2bool(e: ElementState) -> bool {
@@ -190,7 +287,7 @@ fn main() -> Result<()> {
         (
             wb.with_title("Gaze Text Editor")
                 .with_inner_size(glutin::dpi::LogicalSize::new(800., 600.)),
-            cb,
+            cb.with_vsync(false).with_multisampling(4),
         )
     }));
 
@@ -206,14 +303,15 @@ fn main() -> Result<()> {
             font.clone(),
             k.clone(),
         )?),
-        k,
         scroll: default(),
         drag: Drag::None,
+        selecting: None,
         last_mouse_pos: DVec2::ZERO,
         last_size: (1, 1),
         focused: false,
-        draw: DrawState::new(&display, &font)?,
+        draw: DrawState::new(&display, &font, &k)?,
         display,
+        k,
     };
 
     gl_run_loop(
@@ -249,102 +347,68 @@ fn main() -> Result<()> {
                         state: st, button, ..
                     } => {
                         let down = state2bool(st);
-                        if !down {
-                            state.drag = Drag::None;
-                        } else if state.drag.is_none() {
-                            match button {
-                                MouseButton::Left => {
-                                    let pos = state.last_mouse_pos.as_vec2();
-                                    let (w, h) = state.last_size;
-                                    let (byp, bys) =
-                                        state.scroll.y_scrollbar_bounds(&state.k, w, h);
-                                    let (bxp, bxs) =
-                                        state.scroll.x_scrollbar_bounds(&state.k, w, h);
-                                    let (yp, ys) =
-                                        state.scroll.y_scrollhandle_bounds(&state.k, w, h);
-                                    let (xp, xs) =
-                                        state.scroll.x_scrollhandle_bounds(&state.k, w, h);
-                                    if pos.x >= byp.x
-                                        && pos.x < byp.x + bys.x
-                                        && pos.y >= byp.y
-                                        && pos.y < byp.y + bys.y
-                                    {
-                                        // Start dragging through vertical scrollbar
-                                        let mut cut = (pos.y - yp.y) / ys.y;
-                                        if !state.k.ui.drag_scrollbar {
-                                            cut = cut.clamp(0., 1.);
-                                        }
-                                        state.drag = Drag::ScrollbarY { cut };
-                                    } else if pos.x >= bxp.x
-                                        && pos.x <= bxp.x + bxs.x
-                                        && pos.y >= bxp.y
-                                        && pos.y < bxp.y + bxs.y
-                                    {
-                                        // Start dragging through horizontal scrollbar
-                                        let mut cut = (pos.x - xp.x) / xs.x;
-                                        if !state.k.ui.drag_scrollbar {
-                                            cut = cut.clamp(0., 1.);
-                                        }
-                                        state.drag = Drag::ScrollbarX { cut };
-                                    }
-                                }
-                                MouseButton::Right => {
-                                    state.drag = Drag::Grab {
-                                        screen_base: state.last_mouse_pos,
-                                        scroll_base: state.scroll.pos,
-                                    };
-                                }
-                                _ => {}
+                        if state.drag.is_none() && down {
+                            let button = match button {
+                                MouseButton::Left => 0,
+                                MouseButton::Right => 1,
+                                MouseButton::Middle => 2,
+                                MouseButton::Other(b) => b,
+                            };
+                            if button == state.k.ui.grab_button.button {
+                                state.drag = Drag::Grab {
+                                    screen_base: state.last_mouse_pos,
+                                    scroll_base: state.scroll.pos,
+                                };
                             }
+                            if button == state.k.ui.slide_button.button {
+                                state.drag = Drag::Slide {
+                                    screen_base: state.last_mouse_pos,
+                                    last_update: Instant::now().into(),
+                                };
+                            }
+                            if button == state.k.ui.scrollbar_button.button {
+                                let pos = state.last_mouse_pos.as_vec2();
+                                let (w, h) = state.last_size;
+                                let (byp, bys) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
+                                let (bxp, bxs) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
+                                let (yp, ys) = state.scroll.y_scrollhandle_bounds(&state.k, w, h);
+                                let (xp, xs) = state.scroll.x_scrollhandle_bounds(&state.k, w, h);
+                                if pos.x >= byp.x
+                                    && pos.x < byp.x + bys.x
+                                    && pos.y >= byp.y
+                                    && pos.y < byp.y + bys.y
+                                {
+                                    // Start dragging through vertical scrollbar
+                                    let mut cut = (pos.y - yp.y) / ys.y;
+                                    if !state.k.ui.drag_scrollbar && (cut < 0. || cut > 1.) {
+                                        cut = cut.clamp(0., 1.);
+                                        state.redraw();
+                                    }
+                                    state.drag = Drag::ScrollbarY { cut };
+                                } else if pos.x >= bxp.x
+                                    && pos.x <= bxp.x + bxs.x
+                                    && pos.y >= bxp.y
+                                    && pos.y < bxp.y + bxs.y
+                                {
+                                    // Start dragging through horizontal scrollbar
+                                    let mut cut = (pos.x - xp.x) / xs.x;
+                                    if !state.k.ui.drag_scrollbar && (cut < 0. || cut > 1.) {
+                                        cut = cut.clamp(0., 1.);
+                                        state.redraw();
+                                    }
+                                    state.drag = Drag::ScrollbarX { cut };
+                                }
+                            }
+                        } else if down == !state.drag.hold(&state.k) {
+                            // Stop dragging
+                            // Whether the press or release event triggers this is
+                            // configurable per drag-type
+                            state.drag = Drag::None;
                         }
                     }
                     WindowEvent::CursorMoved { position, .. } => {
                         let pos = dvec2(position.x, position.y);
-                        match &state.drag {
-                            Drag::None => {}
-                            &Drag::Grab {
-                                screen_base,
-                                scroll_base,
-                            } => {
-                                let d = state.pixel_to_lines(screen_base - pos);
-                                state.scroll.pos.delta_x = scroll_base.delta_x + d.x;
-                                state.scroll.pos.delta_y = scroll_base.delta_y + d.y;
-                                state.redraw();
-                            }
-                            &Drag::ScrollbarY { cut } => {
-                                let (w, h) = state.last_size;
-                                let (bp, bs) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
-                                let (_p, s) = state.scroll.y_scrollhandle_bounds(&state.k, w, h);
-                                // Coefficient between 0 and 1
-                                let mut y = (pos.y as f32 - s.y * cut - bp.y) / (bs.y - s.y);
-                                if y.is_nan() || y < 0. {
-                                    y = 0.;
-                                } else if y > 1. {
-                                    y = 1.;
-                                }
-                                state.scroll.pos.delta_y = state.scroll.last_bounds.corner.delta_y
-                                    + state.scroll.last_bounds.size.y * y as f64;
-                                state.redraw();
-                            }
-                            &Drag::ScrollbarX { cut } => {
-                                let (w, h) = state.last_size;
-                                let (bp, bs) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
-                                let (_p, s) = state.scroll.x_scrollhandle_bounds(&state.k, w, h);
-                                // Coefficient between 0 and 1
-                                let mut x = (pos.x as f32 - s.x * cut - bp.x) / (bs.x - s.x);
-                                if x.is_nan() || x < 0. {
-                                    x = 0.;
-                                } else if x > 1. {
-                                    x = 1.;
-                                }
-                                if state.scroll.last_bounds.size.x.is_finite() {
-                                    state.scroll.pos.delta_x =
-                                        state.scroll.last_bounds.corner.delta_x
-                                            + state.scroll.last_bounds.size.x * x as f64;
-                                }
-                                state.redraw();
-                            }
-                        }
+                        state.tick_drag(pos);
                         state.last_mouse_pos = pos;
                     }
                     WindowEvent::Focused(f) => state.focused = f,
@@ -357,16 +421,19 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                Event::RedrawRequested(_) => match drawing::draw(&mut state) {
-                    Ok(redraw_soon) => {
-                        if redraw_soon {
-                            state.redraw();
+                Event::RedrawRequested(_) => {
+                    state.tick_drag(state.last_mouse_pos);
+                    match drawing::draw(&mut state) {
+                        Ok(redraw_soon) => {
+                            if redraw_soon || state.drag.requires_refresh() {
+                                state.redraw();
+                            }
+                        }
+                        Err(err) => {
+                            println!("error drawing frame: {:#}", err);
                         }
                     }
-                    Err(err) => {
-                        println!("error drawing frame: {:#}", err);
-                    }
-                },
+                }
                 _ => {}
             }
         }),

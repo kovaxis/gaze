@@ -4,7 +4,7 @@ use ab_glyph::Font;
 
 use crate::prelude::*;
 
-use super::{LoadedData, LoadedDataGuard, ScrollPos, ScrollRect, Surroundings};
+use super::{FilePos, FileRect, LoadedData, LoadedDataGuard, Surroundings};
 
 /// There are two diferent "coordinate systems" in a text file:
 /// - Raw byte offset
@@ -580,15 +580,15 @@ impl LineMapper {
         }
     }
 
-    pub fn bounding_rect(&self, lmap: &LineMap, pos: ScrollPos) -> ScrollRect {
+    pub fn bounding_rect(&self, lmap: &LineMap, pos: FilePos) -> FileRect {
         match lmap.offset_to_base(pos.base_offset) {
             Some((s, base)) => {
                 // Confine to the limits of loaded data
                 if s.is_x_absolute(base) {
                     let lo = s.anchors[s.first_absolute];
                     let hi = s.anchors.back().unwrap();
-                    ScrollRect {
-                        corner: ScrollPos {
+                    FileRect {
+                        corner: FilePos {
                             base_offset: pos.base_offset,
                             delta_x: -base.x_abs(),
                             delta_y: (lo.y_offset - base.y_offset) as f64,
@@ -604,8 +604,8 @@ impl LineMapper {
                         .anchors
                         .get(s.first_absolute)
                         .unwrap_or(s.anchors.back().unwrap());
-                    ScrollRect {
-                        corner: ScrollPos {
+                    FileRect {
+                        corner: FilePos {
                             base_offset: pos.base_offset,
                             delta_x: lo.x_offset - base.x_offset,
                             delta_y: 0.,
@@ -616,8 +616,8 @@ impl LineMapper {
             }
             None => {
                 // Cannot scroll if the data is not yet loaded
-                ScrollRect {
-                    corner: ScrollPos {
+                FileRect {
+                    corner: FilePos {
                         base_offset: pos.base_offset,
                         delta_x: 0.,
                         delta_y: 0.,

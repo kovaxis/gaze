@@ -1,4 +1,4 @@
-use crate::{filebuf::ScrollRect, prelude::*, WindowState};
+use crate::{cfg::Cfg, filebuf::FileRect, prelude::*, Drag, WindowState};
 use ab_glyph::{Font, Glyph};
 use gl::glium::{
     index::{IndicesSource, PrimitiveType},
@@ -99,6 +99,50 @@ impl VertexBuf<FlatVertex> {
             color,
         });
     }
+
+    fn push_prebuilt(&mut self, prebuilt: &[FlatVertex], offset: Vec2) {
+        for v in prebuilt {
+            self.push(FlatVertex {
+                pos: (Vec2::from_array(v.pos) + offset).to_array(),
+                color: v.color,
+            });
+        }
+    }
+
+    fn build_slide_icon(k: &Cfg) -> Vec<FlatVertex> {
+        let mut out = vec![];
+        let k = &k.g.slide_icon;
+        let mut poly = |v: &[Vec2], color: [u8; 4]| {
+            assert!(v.len() >= 3);
+            for i in 1..v.len() - 1 {
+                for j in [0, i, i + 1] {
+                    out.push(FlatVertex {
+                        pos: v[j].to_array(),
+                        color,
+                    });
+                }
+            }
+        };
+        let mut circ = vec![];
+        for i in 0..k.detail {
+            circ.push(
+                Vec2::from_angle(std::f32::consts::TAU * i as f32 / k.detail as f32) * k.radius,
+            );
+        }
+        poly(&circ, k.bg);
+        let mut tri = [vec2(0., -1.), vec2(1., 0.), vec2(0., 1.)];
+        for v in tri.iter_mut() {
+            *v *= k.arrow_size;
+            *v += vec2(k.arrow_shift, 0.);
+        }
+        for _ in 0..4 {
+            poly(&tri, k.fg);
+            for v in tri.iter_mut() {
+                *v = v.perp();
+            }
+        }
+        out
+    }
 }
 
 struct TextScope {
@@ -198,10 +242,11 @@ pub struct DrawState {
     linenums: TextScope,
     text_shader: Program,
     flat_shader: Program,
+    slide_icon: Vec<FlatVertex>,
     aux_vbo: VertexBuf<FlatVertex>,
 }
 impl DrawState {
-    pub fn new(display: &Display, font: &FontArc) -> Result<Self> {
+    pub fn new(display: &Display, font: &FontArc, k: &Cfg) -> Result<Self> {
         let cache_size = (512, 512);
         Ok(Self {
             glyphs: DrawCache::builder()
@@ -214,6 +259,7 @@ impl DrawState {
             linenums: TextScope::new(display)?,
             text_shader: load_shader(display, "text")?,
             flat_shader: load_shader(display, "flat")?,
+            slide_icon: VertexBuf::build_slide_icon(k),
             aux_vbo: VertexBuf::new(display)?,
         })
     }
@@ -283,7 +329,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         let mut file = filebuf.lock();
         // Clamp the scroll window to the loaded bounds
         let scroll_bounds = file.clamp_scroll(&mut state.scroll.pos);
-        state.scroll.last_view = ScrollRect {
+        state.scroll.last_view = FileRect {
             corner: state.scroll.pos,
             size: dvec2(
                 (w as f64 - state.k.g.left_bar as f64) / state.k.g.font_height as f64,
@@ -465,6 +511,14 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
             vec2(ys.x, xs.y),
             state.k.g.scrollcorner_color,
         );
+    }
+
+    // Draw the slide icon if sliding
+    if let Drag::Slide { screen_base, .. } = &state.drag {
+        state
+            .draw
+            .aux_vbo
+            .push_prebuilt(&state.draw.slide_icon, screen_base.as_vec2().round());
     }
 
     // Draw the auxiliary decorations
