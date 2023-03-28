@@ -229,6 +229,86 @@ impl WindowState {
         self.display.gl_window().window().request_redraw();
     }
 
+    fn handle_drag(&mut self, button: u16, down: bool) {
+        if self.drag.is_none() && down {
+            if button == self.k.ui.scrollbar_button.button {
+                // Maybe start dragging one of the scrollbars
+                let pos = self.last_mouse_pos.as_vec2();
+                let (w, h) = self.last_size;
+                let (byp, bys) = self.scroll.y_scrollbar_bounds(&self.k, w, h);
+                let (bxp, bxs) = self.scroll.x_scrollbar_bounds(&self.k, w, h);
+                let (yp, ys) = self.scroll.y_scrollhandle_bounds(&self.k, w, h);
+                let (xp, xs) = self.scroll.x_scrollhandle_bounds(&self.k, w, h);
+                if pos.x >= byp.x
+                    && pos.x < byp.x + bys.x
+                    && pos.y >= byp.y
+                    && pos.y < byp.y + bys.y
+                {
+                    // Start dragging through vertical scrollbar
+                    let mut cut = (pos.y - yp.y) / ys.y;
+                    if !self.k.ui.drag_scrollbar && (cut < 0. || cut > 1.) {
+                        cut = cut.clamp(0., 1.);
+                        self.redraw();
+                    }
+                    self.drag = Drag::ScrollbarY { cut };
+                    return;
+                }
+                if pos.x >= bxp.x
+                    && pos.x <= bxp.x + bxs.x
+                    && pos.y >= bxp.y
+                    && pos.y < bxp.y + bxs.y
+                {
+                    // Start dragging through horizontal scrollbar
+                    let mut cut = (pos.x - xp.x) / xs.x;
+                    if !self.k.ui.drag_scrollbar && (cut < 0. || cut > 1.) {
+                        cut = cut.clamp(0., 1.);
+                        self.redraw();
+                    }
+                    self.drag = Drag::ScrollbarX { cut };
+                    return;
+                }
+            }
+            if button == self.k.ui.slide_button.button {
+                // Start slide-scrolling
+                self.drag = Drag::Slide {
+                    screen_base: self.last_mouse_pos,
+                    last_update: Instant::now().into(),
+                };
+                return;
+            }
+            if button == self.k.ui.grab_button.button {
+                // Start grab-scrolling
+                self.drag = Drag::Grab {
+                    screen_base: self.last_mouse_pos,
+                    scroll_base: self.scroll.pos,
+                };
+                return;
+            }
+        } else if down == !self.drag.hold(&self.k) {
+            // Stop dragging
+            // Whether the press or release event triggers this is
+            // configurable per drag-type
+            self.drag = Drag::None;
+        }
+        if button == self.k.ui.select_button {
+            if down {
+                // Start selecting text
+                let (p, _s) = self.k.file_view_bounds(self.last_size);
+                let pos = (self.last_mouse_pos - p.as_dvec2()) / self.k.g.font_height as f64;
+                self.selected = Selected {
+                    first: self.scroll.pos.offset(pos),
+                    second: self.scroll.pos.offset(pos),
+                    second_set: false,
+                };
+                self.redraw();
+                return;
+            } else {
+                // Stop selecting text
+                self.selected.second_set = true;
+            }
+        }
+    }
+
     fn tick_drag(&mut self, pos: DVec2) {
         // Tick any form of scrolling
         match &self.drag {
@@ -308,6 +388,74 @@ impl WindowState {
         }
     }
 
+    fn handle_event(&mut self, ev: gl::winit::event::Event<()>, flow: &mut ControlFlow) {
+        use gl::winit::event::{Event, WindowEvent};
+        match ev {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => *flow = ControlFlow::Exit,
+                WindowEvent::KeyboardInput { input, .. } => match input.virtual_keycode {
+                    Some(glutin::event::VirtualKeyCode::Escape) => *flow = ControlFlow::Exit,
+                    _ => {}
+                },
+                WindowEvent::MouseWheel { delta, .. } => {
+                    // Scroll directly using mouse/trackpad wheel
+                    let mut d = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => dvec2(-x as f64, -y as f64),
+                        MouseScrollDelta::PixelDelta(d) => {
+                            dvec2(-d.x, -d.y) / self.k.g.font_height as f64
+                        }
+                    };
+                    if self.k.ui.invert_wheel_x {
+                        d.x *= -1.;
+                    }
+                    if self.k.ui.invert_wheel_y {
+                        d.y *= -1.;
+                    }
+                    self.scroll.pos = self.scroll.pos.offset(d);
+                    self.redraw();
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let button = match button {
+                        MouseButton::Left => 0,
+                        MouseButton::Right => 1,
+                        MouseButton::Middle => 2,
+                        MouseButton::Other(b) => b,
+                    };
+                    let down = state2bool(state);
+                    self.handle_drag(button, down);
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let pos = dvec2(position.x, position.y);
+                    self.tick_drag(pos);
+                    self.last_mouse_pos = pos;
+                }
+                WindowEvent::Focused(f) => self.focused = f,
+                _ => {}
+            },
+            Event::DeviceEvent { event, .. } => {
+                if self.focused {
+                    match event {
+                        _ => {}
+                    }
+                }
+            }
+            Event::RedrawRequested(_) => {
+                self.tick_drag(self.last_mouse_pos);
+                match drawing::draw(self) {
+                    Ok(redraw_soon) => {
+                        if redraw_soon || self.drag.requires_refresh() {
+                            self.redraw();
+                        }
+                    }
+                    Err(err) => {
+                        println!("error drawing frame: {:#}", err);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn selected_offsets(&self, file: &FileLock) -> Option<ops::Range<i64>> {
         let (fo, fy, fx) = self.selected.first.floor();
         let mut first = file.lookup_pos(fo, fy, fx)?;
@@ -363,145 +511,8 @@ fn main() -> Result<()> {
     gl_run_loop(
         evloop,
         Box::new(move |ev, flow| {
-            use glutin::event::{Event, WindowEvent};
             *flow = ControlFlow::Wait;
-            match ev {
-                Event::WindowEvent { event, .. } => match event {
-                    WindowEvent::CloseRequested => *flow = ControlFlow::Exit,
-                    WindowEvent::KeyboardInput { input, .. } => match input.virtual_keycode {
-                        Some(glutin::event::VirtualKeyCode::Escape) => *flow = ControlFlow::Exit,
-                        _ => {}
-                    },
-                    WindowEvent::MouseWheel { delta, .. } => {
-                        // Scroll directly using mouse/trackpad wheel
-                        let mut d = match delta {
-                            MouseScrollDelta::LineDelta(x, y) => dvec2(-x as f64, -y as f64),
-                            MouseScrollDelta::PixelDelta(d) => {
-                                dvec2(-d.x, -d.y) / state.k.g.font_height as f64
-                            }
-                        };
-                        if state.k.ui.invert_wheel_x {
-                            d.x *= -1.;
-                        }
-                        if state.k.ui.invert_wheel_y {
-                            d.y *= -1.;
-                        }
-                        state.scroll.pos = state.scroll.pos.offset(d);
-                        state.redraw();
-                    }
-                    WindowEvent::MouseInput {
-                        state: st, button, ..
-                    } => {
-                        let button = match button {
-                            MouseButton::Left => 0,
-                            MouseButton::Right => 1,
-                            MouseButton::Middle => 2,
-                            MouseButton::Other(b) => b,
-                        };
-                        let down = state2bool(st);
-                        if button == state.k.ui.select_button {
-                            if down {
-                                // Start selecting text
-                                let (p, _s) = state.k.file_view_bounds(state.last_size);
-                                let pos = (state.last_mouse_pos - p.as_dvec2())
-                                    / state.k.g.font_height as f64;
-                                state.selected = Selected {
-                                    first: state.scroll.pos.offset(pos),
-                                    second: state.scroll.pos.offset(pos),
-                                    second_set: false,
-                                };
-                                state.redraw();
-                            } else {
-                                // Stop selecting text
-                                state.selected.second_set = true;
-                            }
-                        }
-                        if state.drag.is_none() && down {
-                            if button == state.k.ui.grab_button.button {
-                                // Start grab-scrolling
-                                state.drag = Drag::Grab {
-                                    screen_base: state.last_mouse_pos,
-                                    scroll_base: state.scroll.pos,
-                                };
-                            }
-                            if button == state.k.ui.slide_button.button {
-                                // Start slide-scrolling
-                                state.drag = Drag::Slide {
-                                    screen_base: state.last_mouse_pos,
-                                    last_update: Instant::now().into(),
-                                };
-                            }
-                            if button == state.k.ui.scrollbar_button.button {
-                                // Maybe start dragging one of the scrollbars
-                                let pos = state.last_mouse_pos.as_vec2();
-                                let (w, h) = state.last_size;
-                                let (byp, bys) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
-                                let (bxp, bxs) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
-                                let (yp, ys) = state.scroll.y_scrollhandle_bounds(&state.k, w, h);
-                                let (xp, xs) = state.scroll.x_scrollhandle_bounds(&state.k, w, h);
-                                if pos.x >= byp.x
-                                    && pos.x < byp.x + bys.x
-                                    && pos.y >= byp.y
-                                    && pos.y < byp.y + bys.y
-                                {
-                                    // Start dragging through vertical scrollbar
-                                    let mut cut = (pos.y - yp.y) / ys.y;
-                                    if !state.k.ui.drag_scrollbar && (cut < 0. || cut > 1.) {
-                                        cut = cut.clamp(0., 1.);
-                                        state.redraw();
-                                    }
-                                    state.drag = Drag::ScrollbarY { cut };
-                                } else if pos.x >= bxp.x
-                                    && pos.x <= bxp.x + bxs.x
-                                    && pos.y >= bxp.y
-                                    && pos.y < bxp.y + bxs.y
-                                {
-                                    // Start dragging through horizontal scrollbar
-                                    let mut cut = (pos.x - xp.x) / xs.x;
-                                    if !state.k.ui.drag_scrollbar && (cut < 0. || cut > 1.) {
-                                        cut = cut.clamp(0., 1.);
-                                        state.redraw();
-                                    }
-                                    state.drag = Drag::ScrollbarX { cut };
-                                }
-                            }
-                        } else if down == !state.drag.hold(&state.k) {
-                            // Stop dragging
-                            // Whether the press or release event triggers this is
-                            // configurable per drag-type
-                            state.drag = Drag::None;
-                        }
-                    }
-                    WindowEvent::CursorMoved { position, .. } => {
-                        let pos = dvec2(position.x, position.y);
-                        state.tick_drag(pos);
-                        state.last_mouse_pos = pos;
-                    }
-                    WindowEvent::Focused(f) => state.focused = f,
-                    _ => {}
-                },
-                Event::DeviceEvent { event, .. } => {
-                    if state.focused {
-                        match event {
-                            _ => {}
-                        }
-                    }
-                }
-                Event::RedrawRequested(_) => {
-                    state.tick_drag(state.last_mouse_pos);
-                    match drawing::draw(&mut state) {
-                        Ok(redraw_soon) => {
-                            if redraw_soon || state.drag.requires_refresh() {
-                                state.redraw();
-                            }
-                        }
-                        Err(err) => {
-                            println!("error drawing frame: {:#}", err);
-                        }
-                    }
-                }
-                _ => {}
-            }
+            state.handle_event(ev, flow);
         }),
     )
 }
