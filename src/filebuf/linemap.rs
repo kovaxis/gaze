@@ -92,6 +92,26 @@ impl LineMap {
         Surroundings::Out(prev, self.file_size)
     }
 
+    /// Maps the given screen file position to an absolute offset that is at or before
+    /// the given position.
+    /// Returns a base anchor and the nearest anchor before the position.
+    /// May return `None` if the base offset is not loaded or in other edge cases.
+    pub fn pos_to_anchor(&self, base_offset: i64, dy: i64, dx: f64) -> Option<(Anchor, Anchor)> {
+        let (s, base) = self.offset_to_base(base_offset)?;
+        let is_x_abs = s.is_x_absolute(base);
+        if !is_x_abs && dy != 0 {
+            // When we use a non-absolute base, it means we haven't loaded before
+            // the start of the current line.
+            // Additionally, we don't know the relationship between the X coordinates
+            // of following lines and the base line, therefore if we draw the following
+            // lines it would involve a large amount of dizzy moving text
+            return None;
+        }
+        let y = base.y(s) + dy;
+        let x = base.x_with(s.base_x_relative, is_x_abs) + dx;
+        Some((base, s.locate_lower(y, x)))
+    }
+
     /// Maps the given base offset and a delta range to a pair of anchors that contain the scanline.
     /// Note that these anchors might have Y coordinates different to `dy`.
     /// Returns as a third value the reference anchor, against which the `dy` and `dx` values were
@@ -580,8 +600,8 @@ impl LineMapper {
         }
     }
 
-    pub fn bounding_rect(&self, lmap: &LineMap, pos: FilePos) -> FileRect {
-        match lmap.offset_to_base(pos.base_offset) {
+    pub fn bounding_rect(&self, lmap: &LineMap, around_offset: i64) -> FileRect {
+        match lmap.offset_to_base(around_offset) {
             Some((s, base)) => {
                 // Confine to the limits of loaded data
                 if s.is_x_absolute(base) {
@@ -589,7 +609,7 @@ impl LineMapper {
                     let hi = s.anchors.back().unwrap();
                     FileRect {
                         corner: FilePos {
-                            base_offset: pos.base_offset,
+                            base_offset: around_offset,
                             delta_x: -base.x_abs(),
                             delta_y: (lo.y_offset - base.y_offset) as f64,
                         },
@@ -606,7 +626,7 @@ impl LineMapper {
                         .unwrap_or(s.anchors.back().unwrap());
                     FileRect {
                         corner: FilePos {
-                            base_offset: pos.base_offset,
+                            base_offset: around_offset,
                             delta_x: lo.x_offset - base.x_offset,
                             delta_y: 0.,
                         },
@@ -618,7 +638,7 @@ impl LineMapper {
                 // Cannot scroll if the data is not yet loaded
                 FileRect {
                     corner: FilePos {
-                        base_offset: pos.base_offset,
+                        base_offset: around_offset,
                         delta_x: 0.,
                         delta_y: 0.,
                     },

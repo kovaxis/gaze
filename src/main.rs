@@ -1,7 +1,7 @@
 use crate::prelude::*;
 use cfg::Cfg;
 use drawing::DrawState;
-use filebuf::{FilePos, FileRect};
+use filebuf::{FileLock, FilePos, FileRect};
 use gl::{
     glutin::event_loop::ControlFlow,
     winit::event::{ElementState, MouseButton, MouseScrollDelta},
@@ -180,9 +180,16 @@ impl Drag {
     }
 }
 
-struct Selecting {
+struct Selected {
+    /// The first selected position.
     first: FilePos,
+    /// The second selected position.
+    /// Note that this position might be before the first position,
+    /// the "second" is chronological, not physical.
     second: FilePos,
+    /// Whether the second position has been set down or if it is
+    /// still in flux.
+    second_set: bool,
 }
 
 pub struct WindowState {
@@ -191,7 +198,7 @@ pub struct WindowState {
     file: Option<FileBuffer>,
     k: Cfg,
     drag: Drag,
-    selecting: Option<Selecting>,
+    selected: Selected,
     last_mouse_pos: DVec2,
     last_size: (u32, u32),
     focused: bool,
@@ -202,20 +209,16 @@ impl WindowState {
         self.display.gl_window().window().request_redraw();
     }
 
-    fn pixel_to_lines(&self, pix: DVec2) -> DVec2 {
-        pix / self.k.g.font_height as f64
-    }
-
     fn tick_drag(&mut self, pos: DVec2) {
+        // Tick any form of scrolling
         match &self.drag {
             Drag::None => {}
             Drag::Grab {
                 screen_base,
                 scroll_base,
             } => {
-                let d = self.pixel_to_lines(*screen_base - pos);
-                self.scroll.pos.delta_x = scroll_base.delta_x + d.x;
-                self.scroll.pos.delta_y = scroll_base.delta_y + d.y;
+                let d = (*screen_base - pos) / self.k.g.font_height as f64;
+                self.scroll.pos = scroll_base.offset(d);
                 self.redraw();
             }
             Drag::ScrollbarY { cut } => {
@@ -270,11 +273,30 @@ impl WindowState {
                 }
                 d *= (now - last_update.get()).as_secs_f64();
                 last_update.set(now);
-                self.scroll.pos.delta_x += d.x;
-                self.scroll.pos.delta_y += d.y;
+                self.scroll.pos = self.scroll.pos.offset(d);
                 self.redraw();
             }
         }
+        // Tick selection moves
+        if !self.selected.second_set {
+            let (p, _s) = self.k.file_view_bounds(self.last_size);
+            self.selected.second = self
+                .scroll
+                .pos
+                .offset((self.last_mouse_pos - p.as_dvec2()) / self.k.g.font_height as f64);
+            self.redraw();
+        }
+    }
+
+    fn selected_offsets(&self, file: &FileLock) -> Option<ops::Range<i64>> {
+        let (fo, fy, fx) = self.selected.first.floor();
+        let mut first = file.lookup_pos(fo, fy, fx)?;
+        let (so, sy, sx) = self.selected.second.floor();
+        let mut second = file.lookup_pos(so, sy, sx)?;
+        if second.offset < first.offset {
+            mem::swap(&mut first, &mut second);
+        }
+        Some(first.offset..second.offset)
     }
 }
 
@@ -305,7 +327,11 @@ fn main() -> Result<()> {
         )?),
         scroll: default(),
         drag: Drag::None,
-        selecting: None,
+        selected: Selected {
+            first: default(),
+            second: default(),
+            second_set: true,
+        },
         last_mouse_pos: DVec2::ZERO,
         last_size: (1, 1),
         focused: false,
@@ -327,10 +353,11 @@ fn main() -> Result<()> {
                         _ => {}
                     },
                     WindowEvent::MouseWheel { delta, .. } => {
+                        // Scroll directly using mouse/trackpad wheel
                         let mut d = match delta {
                             MouseScrollDelta::LineDelta(x, y) => dvec2(-x as f64, -y as f64),
                             MouseScrollDelta::PixelDelta(d) => {
-                                state.pixel_to_lines(dvec2(-d.x, -d.y))
+                                dvec2(-d.x, -d.y) / state.k.g.font_height as f64
                             }
                         };
                         if state.k.ui.invert_wheel_x {
@@ -339,34 +366,53 @@ fn main() -> Result<()> {
                         if state.k.ui.invert_wheel_y {
                             d.y *= -1.;
                         }
-                        state.scroll.pos.delta_x += d.x;
-                        state.scroll.pos.delta_y += d.y;
+                        state.scroll.pos = state.scroll.pos.offset(d);
                         state.redraw();
                     }
                     WindowEvent::MouseInput {
                         state: st, button, ..
                     } => {
+                        let button = match button {
+                            MouseButton::Left => 0,
+                            MouseButton::Right => 1,
+                            MouseButton::Middle => 2,
+                            MouseButton::Other(b) => b,
+                        };
                         let down = state2bool(st);
+                        if button == state.k.ui.select_button {
+                            if down {
+                                // Start selecting text
+                                let (p, _s) = state.k.file_view_bounds(state.last_size);
+                                let pos = (state.last_mouse_pos - p.as_dvec2())
+                                    / state.k.g.font_height as f64;
+                                state.selected = Selected {
+                                    first: state.scroll.pos.offset(pos),
+                                    second: state.scroll.pos.offset(pos),
+                                    second_set: false,
+                                };
+                                state.redraw();
+                            } else {
+                                // Stop selecting text
+                                state.selected.second_set = true;
+                            }
+                        }
                         if state.drag.is_none() && down {
-                            let button = match button {
-                                MouseButton::Left => 0,
-                                MouseButton::Right => 1,
-                                MouseButton::Middle => 2,
-                                MouseButton::Other(b) => b,
-                            };
                             if button == state.k.ui.grab_button.button {
+                                // Start grab-scrolling
                                 state.drag = Drag::Grab {
                                     screen_base: state.last_mouse_pos,
                                     scroll_base: state.scroll.pos,
                                 };
                             }
                             if button == state.k.ui.slide_button.button {
+                                // Start slide-scrolling
                                 state.drag = Drag::Slide {
                                     screen_base: state.last_mouse_pos,
                                     last_update: Instant::now().into(),
                                 };
                             }
                             if button == state.k.ui.scrollbar_button.button {
+                                // Maybe start dragging one of the scrollbars
                                 let pos = state.last_mouse_pos.as_vec2();
                                 let (w, h) = state.last_size;
                                 let (byp, bys) = state.scroll.y_scrollbar_bounds(&state.k, w, h);

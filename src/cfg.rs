@@ -97,6 +97,7 @@ pub struct Visual {
     pub linenum_color: [u8; 4],
     pub text_color: [u8; 4],
     pub bg_color: [u8; 4],
+    pub selection_color: [u8; 4],
     pub scrollbar_color: [u8; 4],
     pub scrollhandle_color: [u8; 4],
     pub scrollcorner_color: [u8; 4],
@@ -146,6 +147,7 @@ pub struct Ui {
     pub slide_speed: f64,
     pub slide_base_dist: f64,
     pub slide_double_dist: f64,
+    pub select_button: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -163,6 +165,13 @@ impl Default for Cfg {
     }
 }
 impl Cfg {
+    pub fn file_view_bounds(&self, (w, h): (u32, u32)) -> (Vec2, Vec2) {
+        (
+            vec2(self.g.left_bar, 0.),
+            vec2(w as f32 - self.g.left_bar, h as f32),
+        )
+    }
+
     pub fn near_exe() -> Option<PathBuf> {
         let mut near_exe = std::env::current_exe().ok()?;
         near_exe.pop();

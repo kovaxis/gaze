@@ -322,39 +322,48 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
     let mut textqueue = Duration::ZERO;
     state.draw.text.clear();
     state.draw.linenums.clear();
+    state.draw.aux_vbo.clear();
     let mut all_loaded = true;
     if let Some(filebuf) = state.file.as_ref() {
         // Lock the shared file data
         // We want to do this only once, to minimize latency
         let mut file = filebuf.lock();
-        // Clamp the scroll window to the loaded bounds
-        let scroll_bounds = file.clamp_scroll(&mut state.scroll.pos);
+
+        // Determine the bounds of the loaded area, and clamp the scroll position to it
+        let scroll_bounds = file.bounding_rect(state.scroll.pos.base_offset);
+        state.scroll.pos = scroll_bounds.clamp_pos(state.scroll.pos);
         state.scroll.last_view = FileRect {
             corner: state.scroll.pos,
-            size: dvec2(
-                (w as f64 - state.k.g.left_bar as f64) / state.k.g.font_height as f64,
-                h as f64 / state.k.g.font_height as f64,
-            ),
+            size: (state.k.file_view_bounds((w, h)).1 / state.k.g.font_height).as_dvec2(),
         };
+
         // Only update bounds if not dragging the scrollbar
         // This makes the scrollbar-drag experience much smoother
         // while the file is still being loaded
         if !state.drag.is_scrollbar() {
             state.scroll.last_bounds = scroll_bounds;
         }
+
+        // Transform the selected area from position to absolute offsets
+        let selected = state.selected_offsets(&file);
+
         // Iterate over all characters on the screen and queue them up for rendering
         let mut linenum_buf = String::new();
-        all_loaded = file.visit_rect(state.scroll.last_view, |dx, dy, c| {
+        let mut sel_box = (0., 0., 0.);
+        file.visit_rect(state.scroll.last_view, |offset, dx, dy, c| {
             let inner_start = Instant::now();
+            let (p, _s) = state.k.file_view_bounds((w, h));
             match c {
                 None => {
                     // Starting a line
+                    // Write line number
                     use std::fmt::Write;
                     linenum_buf.clear();
                     let _ = write!(linenum_buf, "{}", dy + 1);
-                    let mut x = state.k.g.left_bar - state.k.g.linenum_pad;
-                    let y =
-                        ((dy + 1) as f64 - state.scroll.pos.delta_y) as f32 * state.k.g.font_height;
+                    let mut x = p.x - state.k.g.linenum_pad;
+                    let y = p.y
+                        + ((dy + 1) as f64 - state.scroll.pos.delta_y) as f32
+                            * state.k.g.font_height;
                     for c in linenum_buf.bytes().rev() {
                         x -= filebuf.advance_for(c as char) as f32 * state.k.g.font_height;
                         state.draw.linenums.push(
@@ -366,25 +375,65 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
                             },
                         );
                     }
+                    // Draw previous selection box
+                    let (y, x0, x1) = &mut sel_box;
+                    if x1 > x0 {
+                        state.draw.aux_vbo.push_quad(
+                            vec2(*x0, *y),
+                            vec2(*x1 - *x0, state.k.g.font_height),
+                            state.k.g.selection_color,
+                        );
+                    }
+                    *y =
+                        p.y + (dy as f64 - state.scroll.pos.delta_y) as f32 * state.k.g.font_height;
+                    *x0 = f32::INFINITY;
+                    *x1 = f32::NEG_INFINITY;
                 }
-                Some(c) => {
+                Some((c, hadv)) => {
                     // Process a single character
-                    let pos = dvec2(
+                    // Figure out screen position of this character
+                    let pos = p + dvec2(
                         dx - state.scroll.pos.delta_x,
                         (dy + 1) as f64 - state.scroll.pos.delta_y,
                     )
                     .as_vec2()
                         * state.k.g.font_height;
+                    // Create and queue the glyph
                     let g = Glyph {
                         id: state.draw.font.glyph_id(c),
                         scale: state.k.g.font_height.into(),
-                        position: (state.k.g.left_bar + pos.x, pos.y).into(),
+                        position: pos.to_array().into(),
                     };
                     state.draw.text.push(&mut state.draw.glyphs, g);
+                    // If the character is selected, make sure the selection box wraps it
+                    if selected
+                        .as_ref()
+                        .map(|r| r.start <= offset && offset < r.end)
+                        .unwrap_or(false)
+                    {
+                        let (_y, x0, x1) = &mut sel_box;
+                        *x0 = x0.min(pos.x);
+                        *x1 = x1.max(pos.x + hadv as f32 * state.k.g.font_height);
+                    }
                 }
             }
             textqueue += inner_start.elapsed();
         });
+        {
+            let (y, x0, x1) = &sel_box;
+            if x1 > x0 {
+                state.draw.aux_vbo.push_quad(
+                    vec2(*x0, *y),
+                    vec2(*x1 - *x0, state.k.g.font_height),
+                    state.k.g.selection_color,
+                );
+            }
+        }
+
+        // If the backend is not idle, we should render periodically to show any updates
+        all_loaded = file.is_backend_idle();
+        // Inform the backend about what area of the file to load (and keep loaded)
+        file.set_hot_area(state.scroll.last_view);
     } else {
         state.scroll.last_bounds = default();
         state.scroll.last_view = default();
@@ -433,38 +482,39 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
 
     //Draw the text and line numbers
     let mvp = Mat4::orthographic_rh_gl(0., w as f32, h as f32, 0., -1., 1.);
-    let uniforms = gl::glium::uniform! {
-        glyph: state.draw.texture.sampled()
-            .magnify_filter(MagnifySamplerFilter::Nearest)
-            .minify_filter(MinifySamplerFilter::Nearest),
-        mvp: mvp.to_cols_array_2d(),
-    };
-    state.draw.text.draw(
-        &mut frame,
-        &state.draw.text_shader,
-        &uniforms,
-        &DrawParameters {
-            blend: Blend::alpha_blending(),
-            scissor: Some(gl::glium::Rect {
-                left: state.k.g.left_bar.round() as u32,
-                bottom: 0,
-                width: w - state.k.g.left_bar.round() as u32,
-                height: h,
-            }),
-            ..default()
-        },
-    )?;
-    state.draw.linenums.draw(
-        &mut frame,
-        &state.draw.text_shader,
-        &uniforms,
-        &DrawParameters {
-            blend: Blend::alpha_blending(),
-            ..default()
-        },
-    )?;
-
-    state.draw.aux_vbo.clear();
+    {
+        let uniforms = gl::glium::uniform! {
+            glyph: state.draw.texture.sampled()
+                .magnify_filter(MagnifySamplerFilter::Nearest)
+                .minify_filter(MinifySamplerFilter::Nearest),
+            mvp: mvp.to_cols_array_2d(),
+        };
+        let (p, s) = state.k.file_view_bounds((w, h));
+        state.draw.text.draw(
+            &mut frame,
+            &state.draw.text_shader,
+            &uniforms,
+            &DrawParameters {
+                blend: Blend::alpha_blending(),
+                scissor: Some(gl::glium::Rect {
+                    left: p.x.ceil() as u32,
+                    bottom: (h as f32 - (p.y + s.y)).ceil() as u32,
+                    width: s.x.floor() as u32,
+                    height: s.y.floor() as u32,
+                }),
+                ..default()
+            },
+        )?;
+        state.draw.linenums.draw(
+            &mut frame,
+            &state.draw.text_shader,
+            &uniforms,
+            &DrawParameters {
+                blend: Blend::alpha_blending(),
+                ..default()
+            },
+        )?;
+    }
 
     // Draw the vertical scrollbar background
     {

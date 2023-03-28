@@ -328,6 +328,17 @@ impl FileBuffer {
     }
 }
 
+pub struct DataAt<'a> {
+    /// Y position relative to the reference anchor.
+    pub dy: i64,
+    /// X position relative to the reference anchor.
+    pub dx: f64,
+    /// Absolute position of the data.
+    pub offset: i64,
+    /// As much data as it could be collected starting at `offset`.
+    pub data: &'a [u8],
+}
+
 /// Lock the data that is shared with the manager thread.
 /// The manager thread goes to
 pub struct FileLock<'a> {
@@ -342,89 +353,101 @@ impl FileLock<'_> {
         }
     }
 
-    pub fn clamp_scroll(&mut self, scroll: &mut FilePos) -> FileRect {
-        let rect = self
-            .filebuf
+    /// Get the bounding rectangle of the loaded area around a given offset.
+    pub fn bounding_rect(&mut self, around_offset: i64) -> FileRect {
+        self.filebuf
             .shared
             .linemapper
-            .bounding_rect(&self.loaded.linemap, *scroll);
-        scroll.delta_y = scroll
-            .delta_y
-            .clamp(rect.corner.delta_y, rect.corner.delta_y + rect.size.y);
-        scroll.delta_x = scroll
-            .delta_x
-            .clamp(rect.corner.delta_x, rect.corner.delta_x + rect.size.x);
-        rect
+            .bounding_rect(&self.loaded.linemap, around_offset)
+    }
+
+    /// Look up a file position (by line Y and fractional X coordinate) and map
+    /// it to the last offset that is before or at the given position.
+    pub fn lookup_pos(&self, base_offset: i64, y: i64, x: f64) -> Option<DataAt> {
+        let loaded = &*self.loaded;
+        let (base, lo) = loaded.linemap.pos_to_anchor(base_offset, y, x)?;
+        let mut offset = lo.offset;
+        let mut data = loaded.data.longest_contiguous(offset);
+        // NOTE: This subtraction makes no sense if one is relative and the other is absolute
+        let mut dx = lo.x_offset - base.x_offset;
+        let mut dy = lo.y_offset - base.y_offset;
+        // Remove excess data before the target position
+        while !data.is_empty() && (dy < y || dy == y && dx < x) {
+            let (c, adv) = decode_utf8(data);
+            match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
+                '\n' => {
+                    if dy == y {
+                        break;
+                    }
+                    dy += 1;
+                    dx = 0.;
+                }
+                c => {
+                    let hadv = self.filebuf.advance_for(c);
+                    if dy == y && dx + hadv > x {
+                        break;
+                    }
+                    dx += hadv;
+                }
+            }
+            data = &data[adv..];
+            offset += adv as i64;
+        }
+        Some(DataAt {
+            dy,
+            dx,
+            offset,
+            data,
+        })
     }
 
     /// Iterate over all lines and characters contained in the given rectangle.
-    /// Returns whether the backend is idle or not.
     pub fn visit_rect(
-        &mut self,
+        &self,
         view: FileRect,
-        mut on_char_or_line: impl FnMut(f64, i64, Option<char>),
-    ) -> bool {
-        let loaded = &mut *self.loaded;
+        mut on_char_or_line: impl FnMut(i64, f64, i64, Option<(char, f64)>),
+    ) {
         let y0 = view.corner.delta_y.floor() as i64;
         let y1 = (view.corner.delta_y + view.size.y).ceil() as i64;
         let x0 = view.corner.delta_x;
         let x1 = view.corner.delta_x + view.size.x;
         for y in y0..y1 {
-            if let Some([lo, hi, base]) =
-                loaded
-                    .linemap
-                    .scanline_to_anchors(view.corner.base_offset, y, (x0, x1))
-            {
-                let mut offset = lo.offset;
-                let mut linedata = loaded.data.longest_prefix(offset, hi.offset);
-                // NOTE: This subtraction makes no sense if one is relative and the other is absolute
-                let mut dx = lo.x_offset - base.x_offset;
-                let mut dy = lo.y_offset - base.y_offset;
-                // Remove excess data at the beggining of the line
-                while !linedata.is_empty() && (dy < y || dy == y && dx < x0) {
-                    let (c, adv) = decode_utf8(linedata);
-                    match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
-                        '\n' => {
-                            if dy == y {
-                                break;
-                            }
-                            dy += 1;
-                            dx = 0.;
-                        }
-                        c => {
-                            let hadv = self.filebuf.advance_for(c);
-                            if dy == y && dx + hadv > x0 {
-                                break;
-                            }
-                            dx += hadv;
-                        }
+            // Look up the start of this line
+            let mut data = match self.lookup_pos(view.corner.base_offset, y, x0) {
+                Some(d) => d,
+                None => continue,
+            };
+            // Process readable text
+            on_char_or_line(data.offset, data.dx, data.dy, None);
+            while !data.data.is_empty() && (data.dy < y || data.dx < x1) {
+                let (c, adv) = decode_utf8(data.data);
+                match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
+                    '\n' => {
+                        break;
                     }
-                    linedata = &linedata[adv..];
-                    offset += adv as i64;
-                }
-                // Process readable text
-                on_char_or_line(dx, dy, None);
-                while !linedata.is_empty() && (dy < y || dx < x1) {
-                    let (c, adv) = decode_utf8(linedata);
-                    match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
-                        '\n' => {
-                            break;
-                        }
-                        c => {
-                            on_char_or_line(dx, dy, Some(c));
-                            dx += self.filebuf.advance_for(c);
-                        }
+                    c => {
+                        let hadv = self.filebuf.advance_for(c);
+                        on_char_or_line(data.offset, data.dx, data.dy, Some((c, hadv)));
+                        data.dx += hadv;
                     }
-                    linedata = &linedata[adv..];
                 }
+                data.data = &data.data[adv..];
+                data.offset += adv as i64;
             }
         }
+    }
+
+    pub fn set_hot_area(&mut self, area: FileRect) {
         // Set hot area
+        let loaded = &mut *self.loaded;
         let prev = loaded.hot;
-        loaded.hot = view;
-        if prev != view {
+        loaded.hot = area;
+        if prev != area {
             self.filebuf.manager.thread().unpark();
         }
+    }
+
+    pub fn is_backend_idle(&self) -> bool {
         // Let the frontend know whether the entire text is loaded or not
         self.filebuf.shared.sleeping.load()
     }
@@ -465,6 +488,19 @@ pub struct FilePos {
     /// A difference in visual Y position from the base offset, as a fractional number of lines.
     pub delta_y: f64,
 }
+impl FilePos {
+    pub fn floor(&self) -> (i64, i64, f64) {
+        (self.base_offset, self.delta_y.floor() as i64, self.delta_x)
+    }
+
+    pub fn offset(&self, off: DVec2) -> Self {
+        Self {
+            base_offset: self.base_offset,
+            delta_x: self.delta_x + off.x,
+            delta_y: self.delta_y + off.y,
+        }
+    }
+}
 
 /// Represents a rectangle of the file.
 /// Does **NOT** represent a linear start-end range, it literally represents
@@ -475,6 +511,17 @@ pub struct FileRect {
     pub corner: FilePos,
     /// The size of this view in line units.
     pub size: DVec2,
+}
+impl FileRect {
+    pub fn clamp_pos(&self, mut pos: FilePos) -> FilePos {
+        pos.delta_y = pos
+            .delta_y
+            .clamp(self.corner.delta_y, self.corner.delta_y + self.size.y);
+        pos.delta_x = pos
+            .delta_x
+            .clamp(self.corner.delta_x, self.corner.delta_x + self.size.x);
+        pos
+    }
 }
 
 type LoadedDataHandle<'a> = &'a Mutex<LoadedData>;

@@ -227,12 +227,11 @@ impl SparseData {
         }
     }
 
-    /// Finds the longest prefix of the given `[lo, hi)` range that is loaded and available.
-    pub fn longest_prefix(&self, lo: i64, hi: i64) -> &[u8] {
+    /// Find the longest contiguous segment of data starting at `at`.
+    pub fn longest_contiguous(&self, at: i64) -> &[u8] {
         for s in self.segments.iter().rev() {
-            if s.offset <= lo {
-                return &s.data[(lo - s.offset).min(s.data.len() as i64) as usize
-                    ..(hi - s.offset).min(s.data.len() as i64) as usize];
+            if s.offset <= at {
+                return &s.data[(at - s.offset).min(s.data.len() as i64) as usize..];
             }
         }
         &[][..]
