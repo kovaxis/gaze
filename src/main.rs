@@ -52,6 +52,16 @@ struct ScrollManager {
     last_bounds: FileRect,
 }
 impl ScrollManager {
+    /// Check whether to draw the vertical scrollbar.
+    fn ydraw(&self, _k: &Cfg) -> bool {
+        self.hcoef() < 1.
+    }
+
+    /// Check whether to draw the horizontal scrollbar.
+    fn xdraw(&self, _k: &Cfg) -> bool {
+        self.wcoef() < 1.
+    }
+
     /// Compute a float value between 0 and 1 indicating where along
     /// the file is the current vertical scroll
     fn ycoef(&self) -> f32 {
@@ -77,9 +87,14 @@ impl ScrollManager {
 
     /// Get the scrollbar rect as origin and size.
     fn y_scrollbar_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
+        let gap = if self.xdraw(k) {
+            k.g.scrollbar_width
+        } else {
+            0.
+        };
         (
             vec2(w as f32 - k.g.scrollbar_width, 0.),
-            vec2(k.g.scrollbar_width, h as f32 - k.g.scrollbar_width),
+            vec2(k.g.scrollbar_width, h as f32 - gap),
         )
     }
 
@@ -116,9 +131,14 @@ impl ScrollManager {
 
     /// Get the scrollbar rect as origin and size.
     fn x_scrollbar_bounds(&self, k: &Cfg, w: u32, h: u32) -> (Vec2, Vec2) {
+        let gap = if self.ydraw(k) {
+            k.g.scrollbar_width
+        } else {
+            0.
+        };
         (
             vec2(0., h as f32 - k.g.scrollbar_width),
-            vec2(w as f32 - k.g.scrollbar_width, k.g.scrollbar_width),
+            vec2(w as f32 - gap, k.g.scrollbar_width),
         )
     }
 

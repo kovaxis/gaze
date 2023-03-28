@@ -516,51 +516,53 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         )?;
     }
 
-    // Draw the vertical scrollbar background
+    // Draw scrollbars
     {
-        let (p, s) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
-        state
-            .draw
-            .aux_vbo
-            .push_quad(p, s, state.k.g.scrollbar_color);
-    }
+        let ydraw = state.scroll.ydraw(&state.k);
+        let xdraw = state.scroll.xdraw(&state.k);
 
-    // Draw the vertical scrollbar handle
-    {
-        let (p, s) = state.scroll.y_scrollhandle_bounds(&state.k, w, h);
-        state
-            .draw
-            .aux_vbo
-            .push_quad(p, s, state.k.g.scrollhandle_color);
-    }
+        if ydraw {
+            // Draw the vertical scrollbar background
+            let (p, s) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
+            state
+                .draw
+                .aux_vbo
+                .push_quad(p, s, state.k.g.scrollbar_color);
 
-    // Draw the horizontal scrollbar background
-    {
-        let (p, s) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
-        state
-            .draw
-            .aux_vbo
-            .push_quad(p, s, state.k.g.scrollbar_color);
-    }
+            // Draw the vertical scrollbar handle
+            let (p, s) = state.scroll.y_scrollhandle_bounds(&state.k, w, h);
+            state
+                .draw
+                .aux_vbo
+                .push_quad(p, s, state.k.g.scrollhandle_color);
+        }
 
-    // Draw the horizontal scrollbar handle
-    {
-        let (p, s) = state.scroll.x_scrollhandle_bounds(&state.k, w, h);
-        state
-            .draw
-            .aux_vbo
-            .push_quad(p, s, state.k.g.scrollhandle_color);
-    }
+        if xdraw {
+            // Draw the horizontal scrollbar background
+            let (p, s) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
+            state
+                .draw
+                .aux_vbo
+                .push_quad(p, s, state.k.g.scrollbar_color);
 
-    // Draw the scrollbar corner
-    {
-        let (yp, ys) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
-        let (xp, xs) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
-        state.draw.aux_vbo.push_quad(
-            vec2(yp.x, xp.y),
-            vec2(ys.x, xs.y),
-            state.k.g.scrollcorner_color,
-        );
+            // Draw the horizontal scrollbar handle
+            let (p, s) = state.scroll.x_scrollhandle_bounds(&state.k, w, h);
+            state
+                .draw
+                .aux_vbo
+                .push_quad(p, s, state.k.g.scrollhandle_color);
+        }
+
+        if xdraw && ydraw {
+            // Draw the scrollbar corner
+            let (yp, ys) = state.scroll.y_scrollbar_bounds(&state.k, w, h);
+            let (xp, xs) = state.scroll.x_scrollbar_bounds(&state.k, w, h);
+            state.draw.aux_vbo.push_quad(
+                vec2(yp.x, xp.y),
+                vec2(ys.x, xs.y),
+                state.k.g.scrollcorner_color,
+            );
+        }
     }
 
     // Draw the slide icon if sliding
