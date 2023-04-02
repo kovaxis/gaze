@@ -167,7 +167,7 @@ impl FileManager {
             let ((l, r), store_data) = {
                 let mut loaded = self.shared.loaded.lock();
 
-                // Process copy operations
+                // Process clipboard copy operations
                 if let (true, Some(sel)) = (loaded.pending_sel_copy, loaded.sel.as_ref()) {
                     let data = loaded.data.longest_contiguous(sel.start);
                     if data.len() as i64 >= sel.end - sel.start {
@@ -177,6 +177,7 @@ impl FileManager {
                             Err(err) => println!("error setting clipboard: {:#}", err),
                         }
                         loaded.pending_sel_copy = false;
+                        MutexGuard::bump(&mut loaded);
                     }
                 }
 

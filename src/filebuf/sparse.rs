@@ -310,7 +310,7 @@ impl SparseData {
                 s.offset += lconsume;
                 // Remove the suffix that is outside `keep`
                 let rconsume =
-                    (keep.end - (s.offset + s.data.len() as i64)).clamp(0, s.data.len() as i64);
+                    ((s.offset + s.data.len() as i64) - keep.end).clamp(0, s.data.len() as i64);
                 s.data.consume_right(rconsume as usize);
                 // Drop the segment if it is empty
                 if s.data.is_empty() {
