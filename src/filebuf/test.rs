@@ -17,10 +17,11 @@ fn init(fsize: i64, max_mem: usize) -> TestInst {
     TestInst {
         loaded: Mutex::new(LoadedData {
             linemap: LineMap::new(fsize),
-            data: SparseData::new(fsize),
+            data: SparseData::new(fsize, 1024, 1024),
             hot: default(),
             sel: None,
             pending_sel_copy: false,
+            warn_time: None,
         }),
         linemapper: LineMapper::new(font, fsize, max_mem, 1024),
     }

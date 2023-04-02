@@ -70,6 +70,9 @@ segment_timing = false
 # Log verbosely all of the loaded segments after loading a segment
 # Only relevant if `segment_load` is true
 segment_details = false
+# Warn when the shared block is locked for more than this amount of milliseconds.
+# Disables warning if negative.
+lock_warn_ms = -1
 
 [file]
 # Control the amount of memory used to cache file offset <-> text position mappings
@@ -78,6 +81,12 @@ linemap_mem = { fract = 0.02, min_mb = 1, max_mb = 128 }
 # How many anchors to migrate in one go
 # Using a large value may cause stutters
 migrate_batch_size = 100000
+# How many bytes to merge between segments in one go
+# Using large values may cause stutters
+merge_batch_size = 100000
+# After data segments are these amount of bytes long, use a slower but
+# lower latency reallocation scheme
+realloc_threshold = 100000
 # How much file to read in one go
 read_size = 1000000
 # How far away from the screen to preload file data.
@@ -123,6 +132,7 @@ pub struct Log {
     pub segment_load: bool,
     pub segment_details: bool,
     pub segment_timing: bool,
+    pub lock_warn_ms: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -136,6 +146,8 @@ pub struct LineMapMem {
 pub struct FileLoading {
     pub linemap_mem: LineMapMem,
     pub migrate_batch_size: usize,
+    pub merge_batch_size: usize,
+    pub realloc_threshold: usize,
     pub read_size: usize,
     pub load_radius: usize,
     pub max_selection_copy: usize,

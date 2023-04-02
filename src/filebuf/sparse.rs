@@ -11,12 +11,12 @@ pub struct SparseSegment {
 pub type SparseHandle<'a> = &'a Mutex<LoadedData>;
 macro_rules! lock_sparse {
     ($handle:expr, $ref:ident) => {
-        let mut $ref = LoadedDataGuard::lock($handle);
+        let mut $ref = LoadedDataGuard::lock($handle, file!(), line!());
         #[allow(unused_mut)]
         let mut $ref = &mut $ref.guard.data;
     };
     ($handle:expr, $lock:ident, $ref:ident) => {
-        let mut $lock = LoadedDataGuard::lock($handle);
+        let mut $lock = LoadedDataGuard::lock($handle, file!(), line!());
         #[allow(unused_mut)]
         let mut $ref = &mut $lock.guard.data;
     };
@@ -24,12 +24,12 @@ macro_rules! lock_sparse {
         drop($ref);
         drop($lock);
         $code
-        $lock = LoadedDataGuard::lock($handle);
+        $lock = LoadedDataGuard::lock($handle, file!(), line!());
         $ref = &mut $lock.guard.data;
     }};
     ($handle:expr, $lock:ident, $ref:ident => bump) => {{
         drop($ref);
-        $lock.bump();
+        $lock.bump(file!(), line!());
         $ref = &mut $lock.guard.data;
     }};
 }
@@ -37,15 +37,21 @@ macro_rules! lock_sparse {
 /// Holds sparse segments of data loaded from a potentially huge file.
 pub struct SparseData {
     pub(super) segments: Vec<SparseSegment>,
-    pub(super) merge_batch_size: usize,
     pub(super) file_size: i64,
+    /// How many bytes to move from one segment to another in a single atomic lock.
+    pub(super) merge_batch_size: usize,
+    /// After a segment is this bytes long, start considering that growing a vector
+    /// of this length could take way too long, and instead allocate a new copy
+    /// while off the lock.
+    pub(super) realloc_threshold: usize,
 }
 impl SparseData {
-    pub fn new(file_size: i64) -> Self {
+    pub fn new(file_size: i64, merge_batch_size: usize, realloc_threshold: usize) -> Self {
         Self {
             segments: default(),
-            merge_batch_size: 4 * 1024,
             file_size,
+            merge_batch_size,
+            realloc_threshold,
         }
     }
 
@@ -159,13 +165,64 @@ impl SparseData {
 
     /// Merge two adjacent segments, assuming they touch right on the edges.
     /// Avoids locking the loaded data for long periods, even with huge segments.
-    fn merge_segments(handle: SparseHandle, l_idx: usize) {
+    fn merge_segments(handle: SparseHandle, l_idx: usize, force_into_left: Option<bool>) {
         lock_sparse!(handle, store, sparse);
         fn get_two(sparse: &mut SparseData, i: usize) -> (&mut SparseSegment, &mut SparseSegment) {
             let (l, r) = sparse.segments.split_at_mut(i + 1);
             (l.last_mut().unwrap(), r.first_mut().unwrap())
         }
-        let into_left = sparse.segments[l_idx].data.len() >= sparse.segments[l_idx + 1].data.len();
+        // Determine whether it's cheaper to move into the left or right segments
+        let into_left;
+        let l_realloc;
+        let r_realloc;
+        let total_cap;
+        {
+            let l = &sparse.segments[l_idx].data;
+            let r = &sparse.segments[l_idx + 1].data;
+            l_realloc = l.capacity() >= sparse.realloc_threshold && l.spare_right() < r.len();
+            r_realloc = r.capacity() >= sparse.realloc_threshold && r.spare_left() < l.len();
+            total_cap = l.len() + r.len();
+            into_left = match force_into_left {
+                Some(il) => il,
+                None => {
+                    let left_cost = r.len() + if l_realloc { l.capacity() } else { 0 };
+                    let right_cost = l.len() + if r_realloc { r.capacity() } else { 0 };
+                    left_cost <= right_cost
+                }
+            };
+        }
+        // If we need to carry out a big reallocation, do it off the lock
+        // TODO: Fix O(n^2) behaviour by clamping allocations to twice the size
+        if into_left && l_realloc {
+            // Create a segment with enough capacity for both datas
+            let off = sparse.segments[l_idx].offset;
+            let seg;
+            lock_sparse!(handle, store, sparse => unlocked {
+                seg = SparseSegment {
+                    offset: off,
+                    data: Demem::with_capacity(0, total_cap),
+                };
+            });
+            sparse.segments.insert(l_idx, seg);
+            lock_sparse!(handle, store, sparse => unlocked {
+                Self::merge_segments(handle, l_idx, Some(true));
+            });
+        } else if !into_left && r_realloc {
+            // Create a segment with enough capacity for both, and merge right segment into it
+            let off =
+                sparse.segments[l_idx + 1].offset + sparse.segments[l_idx + 1].data.len() as i64;
+            let seg;
+            lock_sparse!(handle, store, sparse => unlocked {
+                seg = SparseSegment {
+                    offset: off,
+                    data: Demem::with_capacity(total_cap, 0),
+                };
+            });
+            sparse.segments.insert(l_idx + 2, seg);
+            lock_sparse!(handle, store, sparse => unlocked {
+                Self::merge_segments(handle, l_idx+1, Some(false));
+            });
+        }
         // TODO: Make sure we don't stall while growing the data `Demem`
         // In cases where a large grow needs to be done, this entails allocating a separate clone
         // and slowly copying the data over while regularly bumping the mutex
@@ -213,7 +270,7 @@ impl SparseData {
                 == sparse.segments[i].offset
         {
             lock_sparse!(handle, store, sparse => unlocked {
-                Self::merge_segments(handle, i-1);
+                Self::merge_segments(handle, i-1, None);
             });
             i -= 1;
         }
@@ -223,7 +280,7 @@ impl SparseData {
         {
             drop(sparse);
             drop(store);
-            Self::merge_segments(handle, i);
+            Self::merge_segments(handle, i, None);
         }
     }
 
@@ -283,6 +340,12 @@ impl From<Vec<u8>> for Demem {
     }
 }
 impl Demem {
+    fn with_capacity(lspare: usize, rspare: usize) -> Self {
+        let mut mem = Vec::with_capacity(lspare + rspare);
+        mem.resize(lspare, 0);
+        Self { mem, start: lspare }
+    }
+
     /// Add data to the left.
     fn extend_left(&mut self, data: &[u8]) {
         while data.len() > self.start {
@@ -333,15 +396,27 @@ impl Demem {
         assert!(count <= self.len(), "consumed more than the length");
         self.mem.truncate(self.mem.len() - count);
     }
+
+    fn spare_left(&self) -> usize {
+        self.start
+    }
+
+    fn spare_right(&self) -> usize {
+        self.mem.capacity() - self.mem.len()
+    }
+
+    fn capacity(&self) -> usize {
+        self.mem.capacity()
+    }
 }
 impl fmt::Debug for Demem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "Demem {{ spare_left: {}, memory: {}, spare_right: {} }}",
-            self.start,
-            self.mem.len() - self.start,
-            self.mem.capacity() - self.mem.len()
+            self.spare_left(),
+            self.len(),
+            self.spare_right(),
         )
     }
 }

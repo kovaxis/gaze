@@ -151,12 +151,12 @@ impl fmt::Debug for LineMap {
 pub type LineMapHandle<'a> = &'a Mutex<LoadedData>;
 macro_rules! lock_linemap {
     ($handle:expr, $ref:ident) => {
-        let mut $ref = LoadedDataGuard::lock($handle);
+        let mut $ref = LoadedDataGuard::lock($handle, file!(), line!());
         #[allow(unused_mut)]
         let mut $ref = &mut $ref.guard.linemap;
     };
     ($handle:expr, $lock:ident, $ref:ident) => {
-        let mut $lock = LoadedDataGuard::lock($handle);
+        let mut $lock = LoadedDataGuard::lock($handle, file!(), line!());
         #[allow(unused_mut)]
         let mut $ref = &mut $lock.guard.linemap;
     };
@@ -169,7 +169,7 @@ macro_rules! lock_linemap {
     }};
     ($handle:expr, $lock:ident, $ref:ident => bump) => {{
         drop($ref);
-        $lock.bump();
+        $lock.bump(file!(), line!());
         $ref = &mut $lock.guard.linemap;
     }};
 }

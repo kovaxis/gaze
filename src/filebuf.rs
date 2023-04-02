@@ -23,6 +23,7 @@ pub struct LoadedData {
     pub hot: FileRect,
     pub sel: Option<ops::Range<i64>>,
     pub pending_sel_copy: bool,
+    pub warn_time: Option<Duration>,
 }
 impl LoadedData {
     fn try_get_hot_range(&self) -> Option<(i64, i64, i64)> {
@@ -323,11 +324,16 @@ impl FileBuffer {
                 k.f.migrate_batch_size,
             ),
             loaded: LoadedData {
-                data: SparseData::new(file_size),
+                data: SparseData::new(file_size, k.f.merge_batch_size, k.f.realloc_threshold),
                 linemap: LineMap::new(file_size),
                 hot: default(),
                 sel: None,
                 pending_sel_copy: false,
+                warn_time: if k.log.lock_warn_ms < 0. {
+                    None
+                } else {
+                    Some(Duration::from_secs_f64(k.log.lock_warn_ms / 1000.))
+                },
             }
             .into(),
             k,
@@ -562,6 +568,8 @@ impl FileRect {
 type LoadedDataHandle<'a> = &'a Mutex<LoadedData>;
 
 struct LoadedDataGuard<'a> {
+    file: &'static str,
+    line: u32,
     start: Instant,
     guard: MutexGuard<'a, LoadedData>,
 }
@@ -570,27 +578,35 @@ impl Drop for LoadedDataGuard<'_> {
         self.check_time();
     }
 }
-impl LoadedDataGuard<'_> {
-    fn lock(handle: LoadedDataHandle) -> LoadedDataGuard {
+impl<'a> LoadedDataGuard<'a> {
+    fn lock(handle: LoadedDataHandle<'a>, file: &'static str, line: u32) -> Self {
         LoadedDataGuard {
+            file,
+            line,
             guard: handle.lock(),
             start: Instant::now(),
         }
     }
 
-    fn bump(&mut self) {
+    fn bump(&mut self, file: &'static str, line: u32) {
         self.check_time();
         MutexGuard::bump(&mut self.guard);
         self.start = Instant::now();
+        self.file = file;
+        self.line = line;
     }
 
     fn check_time(&self) {
-        let t = self.start.elapsed();
-        if t > Duration::from_millis(5) {
-            println!(
-                "operation locked common data for {}ms",
-                t.as_secs_f64() * 1000.
-            );
+        if let Some(maxt) = self.guard.warn_time {
+            let t = self.start.elapsed();
+            if t > maxt {
+                println!(
+                    "WARNING: locked common data for {:.3}ms at {}:{}",
+                    t.as_secs_f64() * 1000.,
+                    self.file,
+                    self.line,
+                );
+            }
         }
     }
 }
