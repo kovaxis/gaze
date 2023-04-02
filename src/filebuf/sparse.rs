@@ -175,13 +175,13 @@ impl SparseData {
         let into_left;
         let l_realloc;
         let r_realloc;
-        let total_cap;
+        let realloc_size;
         {
             let l = &sparse.segments[l_idx].data;
             let r = &sparse.segments[l_idx + 1].data;
             l_realloc = l.capacity() >= sparse.realloc_threshold && l.spare_right() < r.len();
             r_realloc = r.capacity() >= sparse.realloc_threshold && r.spare_left() < l.len();
-            total_cap = l.len() + r.len();
+            realloc_size = (l.len() + r.len()).next_power_of_two();
             into_left = match force_into_left {
                 Some(il) => il,
                 None => {
@@ -192,7 +192,6 @@ impl SparseData {
             };
         }
         // If we need to carry out a big reallocation, do it off the lock
-        // TODO: Fix O(n^2) behaviour by clamping allocations to twice the size
         if into_left && l_realloc {
             // Create a segment with enough capacity for both datas
             let off = sparse.segments[l_idx].offset;
@@ -200,7 +199,7 @@ impl SparseData {
             lock_sparse!(handle, store, sparse => unlocked {
                 seg = SparseSegment {
                     offset: off,
-                    data: Demem::with_capacity(0, total_cap),
+                    data: Demem::with_capacity(0, realloc_size),
                 };
             });
             sparse.segments.insert(l_idx, seg);
@@ -215,7 +214,7 @@ impl SparseData {
             lock_sparse!(handle, store, sparse => unlocked {
                 seg = SparseSegment {
                     offset: off,
-                    data: Demem::with_capacity(total_cap, 0),
+                    data: Demem::with_capacity(realloc_size, 0),
                 };
             });
             sparse.segments.insert(l_idx + 2, seg);
