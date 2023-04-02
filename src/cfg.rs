@@ -128,6 +128,7 @@ pub struct FileLoading {
     pub migrate_batch_size: usize,
     pub read_size: usize,
     pub load_radius: usize,
+    pub max_selection_copy: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

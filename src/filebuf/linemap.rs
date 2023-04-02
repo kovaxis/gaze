@@ -112,16 +112,16 @@ impl LineMap {
         Some((base, s.locate_lower(y, x)))
     }
 
-    /// Maps the given base offset and a delta range to a pair of anchors that contain the scanline.
-    /// Note that these anchors might have Y coordinates different to `dy`.
-    /// Returns as a third value the reference anchor, against which the `dy` and `dx` values were
-    /// operated.
-    pub fn scanline_to_anchors(
+    /// Maps the given screen file position to an absolute offset that is at or after
+    /// the given position.
+    /// Returns a base anchor and the nearest anchor after the position.
+    /// May return `None` if the base offset is not loaded or in other edge cases.
+    pub fn pos_to_anchor_upper(
         &self,
         base_offset: i64,
         dy: i64,
-        dx: (f64, f64),
-    ) -> Option<[Anchor; 3]> {
+        dx: f64,
+    ) -> Option<(Anchor, Anchor)> {
         let (s, base) = self.offset_to_base(base_offset)?;
         let is_x_abs = s.is_x_absolute(base);
         if !is_x_abs && dy != 0 {
@@ -133,11 +133,8 @@ impl LineMap {
             return None;
         }
         let y = base.y(s) + dy;
-        let x0 = base.x_with(s.base_x_relative, is_x_abs) + dx.0;
-        let x1 = base.x_with(s.base_x_relative, is_x_abs) + dx.1;
-        let lo = s.locate_lower(y, x0);
-        let hi = s.locate_upper(y, x1);
-        Some([lo, hi, base])
+        let x = base.x_with(s.base_x_relative, is_x_abs) + dx;
+        Some((base, s.locate_upper(y, x)))
     }
 
     fn offset_to_base(&self, base_offset: i64) -> Option<(&MappedSegment, Anchor)> {

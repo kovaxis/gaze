@@ -202,7 +202,7 @@ impl Drag {
             Drag::ScrollbarX { .. } | Drag::ScrollbarY { .. } => k.ui.scrollbar_button.hold,
             Drag::Grab { .. } => k.ui.grab_button.hold,
             Drag::Slide { .. } => k.ui.slide_button.hold,
-            Drag::None => false,
+            Drag::None => true,
         }
     }
 }
@@ -228,6 +228,8 @@ pub struct WindowState {
     selected: Selected,
     last_mouse_pos: DVec2,
     last_size: (u32, u32),
+    ctrl_down: bool,
+    send_sel_copy: bool,
     focused: bool,
     scroll: ScrollManager,
 }
@@ -254,7 +256,7 @@ impl WindowState {
                     // Start dragging through vertical scrollbar
                     let mut cut = (pos.y - yp.y) / ys.y;
                     if !self.k.ui.drag_scrollbar && (cut < 0. || cut > 1.) {
-                        cut = cut.clamp(0., 1.);
+                        cut = 0.5;
                         self.redraw();
                     }
                     self.drag = Drag::ScrollbarY { cut };
@@ -268,7 +270,7 @@ impl WindowState {
                     // Start dragging through horizontal scrollbar
                     let mut cut = (pos.x - xp.x) / xs.x;
                     if !self.k.ui.drag_scrollbar && (cut < 0. || cut > 1.) {
-                        cut = cut.clamp(0., 1.);
+                        cut = 0.5;
                         self.redraw();
                     }
                     self.drag = Drag::ScrollbarX { cut };
@@ -399,10 +401,19 @@ impl WindowState {
         match ev {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *flow = ControlFlow::Exit,
-                WindowEvent::KeyboardInput { input, .. } => match input.virtual_keycode {
-                    Some(glutin::event::VirtualKeyCode::Escape) => *flow = ControlFlow::Exit,
-                    _ => {}
-                },
+                WindowEvent::KeyboardInput { input, .. } => {
+                    use glutin::event::VirtualKeyCode::*;
+                    let down = state2bool(input.state);
+                    match input.virtual_keycode {
+                        Some(Escape) => *flow = ControlFlow::Exit,
+                        Some(LControl) => self.ctrl_down = down,
+                        Some(C) if down && self.ctrl_down => {
+                            self.send_sel_copy = true;
+                            self.redraw();
+                        }
+                        _ => {}
+                    }
+                }
                 WindowEvent::MouseWheel { delta, .. } => {
                     // Scroll directly using mouse/trackpad wheel
                     let mut d = match delta {
@@ -494,6 +505,8 @@ fn state2bool(e: ElementState) -> bool {
 }
 
 fn main() -> Result<()> {
+    gl::clipboard::maybe_serve().map_err(|e| anyhow!("failed to serve clipboard: {}", e))?;
+
     let (evloop, display) = gl_create_display(Box::new(|wb, cb| {
         (
             wb.with_title("Gaze Text Editor")
@@ -505,15 +518,16 @@ fn main() -> Result<()> {
     let font = FontArc::try_from_vec(fs::read("font.ttf").context("failed to read font file")?)?;
     let k = Cfg::load_or_new();
 
+    let path = PathBuf::from(
+        std::env::args_os()
+            .nth(1)
+            .ok_or(anyhow!("expected file to open as argument"))?,
+    );
     let mut state = WindowState {
-        file: Some(FileBuffer::open(
-            std::env::args_os()
-                .nth(1)
-                .ok_or(anyhow!("expected file to open as argument"))?
-                .as_ref(),
-            font.clone(),
-            k.clone(),
-        )?),
+        file: Some(
+            FileBuffer::open(path.as_path(), font.clone(), k.clone())
+                .with_context(|| anyhow!("failed to open file at \"{}\"", path.display()))?,
+        ),
         scroll: default(),
         drag: Drag::None,
         selected: Selected {
@@ -523,6 +537,8 @@ fn main() -> Result<()> {
         },
         last_mouse_pos: DVec2::ZERO,
         last_size: (1, 1),
+        ctrl_down: false,
+        send_sel_copy: false,
         focused: false,
         draw: DrawState::new(&display, &font, &k)?,
         display,

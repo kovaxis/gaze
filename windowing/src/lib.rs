@@ -27,3 +27,19 @@ pub fn gl_run_loop(
 ) -> ! {
     evloop.run(move |ev, _evloop, flow| on_ev(ev, flow))
 }
+
+pub mod clipboard;
+
+trait StrResultExt {
+    type Ok;
+    fn str_err(self) -> Result<Self::Ok, String>;
+}
+impl<T, E> StrResultExt for Result<T, E>
+where
+    E: std::fmt::Display,
+{
+    type Ok = T;
+    fn str_err(self) -> Result<T, String> {
+        self.map_err(|e| format!("{}", e))
+    }
+}

@@ -439,7 +439,12 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
         // If the backend is not idle, we should render periodically to show any updates
         all_loaded = file.is_backend_idle();
         // Inform the backend about what area of the file to load (and keep loaded)
-        file.set_hot_area(state.scroll.last_view);
+        file.set_hot_area(state.scroll.last_view, selected);
+        // Send a copy command if requested
+        if state.send_sel_copy {
+            file.copy_selection();
+            state.send_sel_copy = false;
+        }
     } else {
         state.scroll.last_bounds = default();
         state.scroll.last_view = default();

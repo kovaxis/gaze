@@ -21,6 +21,8 @@ pub struct LoadedData {
     pub linemap: LineMap,
     pub data: SparseData,
     pub hot: FileRect,
+    pub sel: Option<ops::Range<i64>>,
+    pub pending_sel_copy: bool,
 }
 impl LoadedData {
     fn try_get_hot_range(&self) -> Option<(i64, i64, i64)> {
@@ -33,18 +35,9 @@ impl LoadedData {
         let x1 = self.hot.corner.delta_x + self.hot.size.x;
         let xm = (x0 + x1) / 2.;
         // Get offsets
-        let l = self
-            .linemap
-            .scanline_to_anchors(base, y0, (x0, x0))
-            .map(|a| a[0])?;
-        let m = self
-            .linemap
-            .scanline_to_anchors(base, ym, (xm, xm))
-            .map(|a| a[0])?;
-        let r = self
-            .linemap
-            .scanline_to_anchors(base, y1, (x1, x1))
-            .map(|a| a[0])?;
+        let l = self.linemap.pos_to_anchor(base, y0, x0)?.1;
+        let m = self.linemap.pos_to_anchor(base, ym, xm)?.1;
+        let r = self.linemap.pos_to_anchor_upper(base, y1, x1)?.1;
         Some((l.offset, m.offset, r.offset))
     }
 
@@ -93,19 +86,36 @@ impl LoadedData {
     /// Also returns a boolean indicating if the range is "close" and its data
     /// should be stored (as opposed to "far away" ranges that should only be
     /// linemapped but not loaded).
-    fn get_range_to_load(&self, max_len: i64, load_radius: i64) -> ((i64, i64), bool) {
+    fn get_range_to_load(
+        &self,
+        max_len: i64,
+        load_radius: i64,
+        max_sel: i64,
+    ) -> ((i64, i64), bool) {
         let (lscreen, m, rscreen) = self.get_hot_range();
         let lm = self.linemap.find_surroundings(m);
         let sd = self.data.find_surroundings(m);
         let guide = lm.min(sd);
         let (l, r) = self.surroundings_to_range(guide, (lscreen, m, rscreen), max_len);
-        if lscreen - r >= load_radius || l - rscreen > load_radius {
-            // Nothing more to load, proceed to linemap farther out
-            let (l, r) = self.surroundings_to_range(lm, (lscreen, m, rscreen), max_len);
-            ((l, r), false)
-        } else {
-            ((l, r), true)
+        // Load the visible screen if not loaded yet
+        if lscreen - r < load_radius && l - rscreen <= load_radius {
+            return ((l, r), true);
         }
+        // Finished loading the local range, now attempt to load the selected range
+        if let Some(sel) = self.sel.as_ref() {
+            if sel.end - sel.start <= max_sel {
+                let l = match self.data.find_surroundings(sel.start) {
+                    Surroundings::In(_l, r) => r,
+                    Surroundings::Out(_, _) => sel.start,
+                };
+                if l < sel.end {
+                    return ((l, sel.end.min(l + max_len)), true);
+                }
+            }
+        }
+        // Nothing more to load, proceed to linemap farther out
+        let (l, r) = self.surroundings_to_range(lm, (lscreen, m, rscreen), max_len);
+        ((l, r), false)
     }
 }
 
@@ -151,13 +161,29 @@ impl FileManager {
 
     fn run(mut self) -> Result<()> {
         while !self.shared.stop.load() {
+            // Find something to do
             let ((l, r), store_data) = {
-                let loaded = self.shared.loaded.lock();
+                let mut loaded = self.shared.loaded.lock();
+
+                // Process copy operations
+                if let (true, Some(sel)) = (loaded.pending_sel_copy, loaded.sel.as_ref()) {
+                    let data = loaded.data.longest_contiguous(sel.start);
+                    if data.len() as i64 >= sel.end - sel.start {
+                        let data = &data[..(sel.end - sel.start) as usize];
+                        match set_clipboard(data) {
+                            Ok(()) => println!("put {} bytes into clipboard", data.len()),
+                            Err(err) => println!("error setting clipboard: {:#}", err),
+                        }
+                        loaded.pending_sel_copy = false;
+                    }
+                }
+
                 let start = Instant::now();
                 // Load data around the hot offset
                 let out = loaded.get_range_to_load(
                     self.shared.k.f.read_size as i64,
                     self.shared.k.f.load_radius as i64,
+                    self.shared.k.f.max_selection_copy as i64,
                 );
                 let segn = loaded.data.segments.len();
                 drop(loaded);
@@ -300,6 +326,8 @@ impl FileBuffer {
                 data: SparseData::new(file_size),
                 linemap: LineMap::new(file_size),
                 hot: default(),
+                sel: None,
+                pending_sel_copy: false,
             }
             .into(),
             k,
@@ -437,12 +465,13 @@ impl FileLock<'_> {
         }
     }
 
-    pub fn set_hot_area(&mut self, area: FileRect) {
+    pub fn set_hot_area(&mut self, area: FileRect, selection: Option<ops::Range<i64>>) {
         // Set hot area
         let loaded = &mut *self.loaded;
-        let prev = loaded.hot;
+        let prev = (loaded.hot, loaded.sel.clone());
         loaded.hot = area;
-        if prev != area {
+        loaded.sel = selection.clone();
+        if prev != (area, selection) {
             self.filebuf.manager.thread().unpark();
         }
     }
@@ -450,6 +479,12 @@ impl FileLock<'_> {
     pub fn is_backend_idle(&self) -> bool {
         // Let the frontend know whether the entire text is loaded or not
         self.filebuf.shared.sleeping.load()
+    }
+
+    /// Request the backend to copy the selected text.
+    pub fn copy_selection(&mut self) {
+        self.loaded.pending_sel_copy = true;
+        self.filebuf.manager.thread().unpark();
     }
 }
 
@@ -558,4 +593,10 @@ impl LoadedDataGuard<'_> {
             );
         }
     }
+}
+
+fn set_clipboard(data: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(data).context("invalid utf-8 data")?;
+    gl::clipboard::set(text).map_err(|e| anyhow!("{}", e))?;
+    Ok(())
 }
