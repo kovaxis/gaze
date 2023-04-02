@@ -26,6 +26,8 @@ slide_speed = 20
 slide_base_dist = 0.10
 # Every this amount of screensizes the sliding speed is doubled
 slide_double_dist = 0.055
+# Button used to select text
+select_button = 0
 
 [visual]
 # Height in pixels of a line of text.
@@ -40,6 +42,10 @@ linenum_color = [102, 102, 102, 255]
 text_color = [255, 255, 255, 255]
 # Background color.
 bg_color = [3, 3, 4, 255]
+# Overlay color of selected text
+selection_color = [10, 10, 180, 255]
+# Y offset applied to the selection highlight, proportional to the font height.
+selection_offset = 0.2
 # Color of the scrollbar background.
 scrollbar_color = [10, 10, 10, 220]
 # Color of the corner square between the vertical and horizontal scrollbars
@@ -76,6 +82,10 @@ migrate_batch_size = 100000
 read_size = 1000000
 # How far away from the screen to preload file data.
 load_radius = 1000000
+# The maximum amount of data that can be copied out of the file.
+# When selecting a range of this size, the data for this range will be loaded
+# into RAM!
+max_selection_copy = 500000000
 "#;
 
 #[derive(Serialize, Deserialize, Clone)]
