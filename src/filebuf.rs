@@ -351,7 +351,7 @@ impl FileBuffer {
         self.shared.file_size
     }
 
-    pub fn advance_for(&self, c: char) -> f64 {
+    pub fn advance_for(&self, c: u32) -> f64 {
         self.shared.linemapper.advance_for(c)
     }
 }
@@ -403,7 +403,7 @@ impl FileLock<'_> {
         while !data.is_empty() && (dy < y || dy == y && dx < x) {
             let (c, adv) = decode_utf8(data);
             match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
-                '\n' => {
+                LineMapper::NEWLINE => {
                     if dy == y {
                         break;
                     }
@@ -433,7 +433,7 @@ impl FileLock<'_> {
     pub fn visit_rect(
         &self,
         view: FileRect,
-        mut on_char_or_line: impl FnMut(i64, f64, i64, Option<(char, f64)>),
+        mut on_char_or_line: impl FnMut(i64, f64, i64, Option<(u32, f64)>),
     ) {
         let y0 = view.corner.delta_y.floor() as i64;
         let y1 = (view.corner.delta_y + view.size.y).ceil() as i64;
@@ -450,7 +450,7 @@ impl FileLock<'_> {
             while !data.data.is_empty() && (data.dy < y || data.dx < x1) {
                 let (c, adv) = decode_utf8(data.data);
                 match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
-                    '\n' => {
+                    LineMapper::NEWLINE => {
                         break;
                     }
                     c => {

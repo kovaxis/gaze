@@ -177,11 +177,12 @@ macro_rules! lock_linemap {
 pub struct LineMapper {
     pub(super) bytes_per_anchor: usize,
     pub(super) migrate_batch_size: usize,
-    pub(super) char_adv: FxHashMap<char, f32>,
+    pub(super) char_adv: FxHashMap<u32, f32>,
     pub(super) default_char_adv: f32,
 }
 impl LineMapper {
-    pub const REPLACEMENT_CHAR: char = char::REPLACEMENT_CHARACTER;
+    pub const REPLACEMENT_CHAR: u32 = char::REPLACEMENT_CHARACTER as u32;
+    pub const NEWLINE: u32 = '\n' as u32;
 
     pub fn new(
         font: FontArc,
@@ -195,10 +196,10 @@ impl LineMapper {
             .max(mem::size_of::<Anchor>()); // reasonable minimum
         println!("spreading anchors {} bytes apart", bytes_per_anchor);
         let font_h = font.height_unscaled();
-        let mut char_adv: FxHashMap<char, f32> = default();
+        let mut char_adv: FxHashMap<u32, f32> = default();
         char_adv.reserve(font.glyph_count());
         for (glyph, c) in font.codepoint_ids() {
-            char_adv.insert(c, font.h_advance_unscaled(glyph) / font_h);
+            char_adv.insert(c as u32, font.h_advance_unscaled(glyph) / font_h);
         }
         println!("got {} char -> hadvance mappings", char_adv.len());
         Self {
@@ -209,7 +210,8 @@ impl LineMapper {
         }
     }
 
-    pub fn advance_for(&self, c: char) -> f64 {
+    /// Receives a relaxed Unicode codepoint
+    pub fn advance_for(&self, c: u32) -> f64 {
         *self.char_adv.get(&c).unwrap_or(&self.default_char_adv) as f64
     }
 
@@ -282,7 +284,8 @@ impl LineMapper {
                 }
             }
             match c {
-                '\n' => {
+                Self::NEWLINE => {
+                    // Newline
                     if abs_x {
                         seg.widest_line = seg.widest_line.max(cur_x);
                     } else {
@@ -773,11 +776,14 @@ fn utf8_seq_len(b: u8) -> usize {
 /// Returns the length of the character.
 /// If given malformed UTF-8 it may not raise an error but produce incorrect
 /// results.
-pub fn decode_utf8(b: &[u8]) -> (Result<char, u8>, usize) {
+/// However, it still checks the validity of continuation bytes, a feature
+/// that is necessary for synchronizing with UTF-8 streams starting from an
+/// arbitrary position.
+pub fn decode_utf8(b: &[u8]) -> (Result<u32, u8>, usize) {
     assert!(!b.is_empty());
     if b[0] & 0b1000_0000 == 0 {
         // Single byte
-        (Ok(b[0] as char), 1)
+        (Ok(b[0] as u32), 1)
     } else if b[0] & 0b0100_0000 == 0 {
         // Continuation byte
         (Err(b[0]), 1)
@@ -786,50 +792,35 @@ pub fn decode_utf8(b: &[u8]) -> (Result<char, u8>, usize) {
         if b.len() < 2 || !is_utf8_cont(b[1]) {
             (Err(b[0]), 1)
         } else {
-            // SAFETY: From the standard library docs:
-            // A char is a ‘Unicode scalar value’, which is any ‘Unicode code point’ other than a
-            // surrogate code point. This has a fixed numerical definition: code points are in the
-            // range 0 to 0x10FFFF, inclusive. Surrogate code points, used by UTF-16, are in the range
-            // 0xD800 to 0xDFFF.
-            // Because the resulting `u32` only has at most the lowest 11 bits set, it never reaches
-            // into the invalid range (it is always in the range 0x000 - 0x7FF)
-            unsafe {
-                (
-                    Ok(char::from_u32_unchecked(
-                        (b[0] as u32 & 0b0001_1111) << 6 | (b[1] as u32 & 0b0011_1111),
-                    )),
-                    2,
-                )
-            }
+            (
+                Ok((b[0] as u32 & 0b0001_1111) << 6 | (b[1] as u32 & 0b0011_1111)),
+                2,
+            )
         }
     } else if b[0] & 0b0001_0000 == 0 {
         // Three bytes
         if b.len() < 3 || !is_utf8_cont(b[1]) || !is_utf8_cont(b[2]) {
             (Err(b[0]), 1)
         } else {
-            match char::from_u32(
-                (b[0] as u32 & 0b1111) << 12
+            (
+                Ok((b[0] as u32 & 0b1111) << 12
                     | (b[1] as u32 & 0b0011_1111) << 6
-                    | (b[2] as u32 & 0b0011_1111),
-            ) {
-                Some(c) => (Ok(c), 3),
-                None => (Err(b[0]), 1),
-            }
+                    | (b[2] as u32 & 0b0011_1111)),
+                3,
+            )
         }
     } else if b[0] & 0b0000_1000 == 0 {
         // Four bytes
         if b.len() < 4 || !is_utf8_cont(b[1]) || !is_utf8_cont(b[2]) || !is_utf8_cont(b[3]) {
             (Err(b[0]), 1)
         } else {
-            match char::from_u32(
-                (b[0] as u32 & 0b0111) << 18
+            (
+                Ok((b[0] as u32 & 0b0111) << 18
                     | (b[1] as u32 & 0b0011_1111) << 12
                     | (b[2] as u32 & 0b0011_1111) << 6
-                    | (b[3] as u32 & 0b0011_1111),
-            ) {
-                Some(c) => (Ok(c), 4),
-                None => (Err(b[0]), 1),
-            }
+                    | (b[3] as u32 & 0b0011_1111)),
+                4,
+            )
         }
     } else {
         // Invalid header byte

@@ -89,7 +89,7 @@ fn assert_full_data_loaded(t: &TestInst, data: &[u8]) {
         idx += adv;
         let x_i = x;
         match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
-            '\n' => {
+            LineMapper::NEWLINE => {
                 w = w.max(x);
                 x = 0.;
                 y += 1;

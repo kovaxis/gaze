@@ -369,7 +369,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
                         + ((dy + 1) as f64 - state.scroll.pos.delta_y) as f32
                             * state.k.g.font_height;
                     for c in linenum_buf.bytes().rev() {
-                        x -= filebuf.advance_for(c as char) as f32 * state.k.g.font_height;
+                        x -= filebuf.advance_for(c as u32) as f32 * state.k.g.font_height;
                         state.draw.linenums.push(
                             &mut state.draw.glyphs,
                             Glyph {
@@ -406,7 +406,7 @@ pub fn draw(state: &mut WindowState) -> Result<bool> {
                         * state.k.g.font_height;
                     // Create and queue the glyph
                     let g = Glyph {
-                        id: state.draw.font.glyph_id(c),
+                        id: state.draw.font.glyph_id(char::from_u32(c).unwrap_or('\0')),
                         scale: state.k.g.font_height.into(),
                         position: pos.to_array().into(),
                     };
