@@ -38,6 +38,8 @@ macro_rules! lock_sparse {
 pub struct SparseData {
     pub(super) segments: Vec<SparseSegment>,
     pub(super) file_size: i64,
+    /// Start dropping far away data to keep memory usage under this amount.
+    pub(super) max_loaded: usize,
     /// How many bytes to move from one segment to another in a single atomic lock.
     pub(super) merge_batch_size: usize,
     /// After a segment is this bytes long, start considering that growing a vector
@@ -46,10 +48,16 @@ pub struct SparseData {
     pub(super) realloc_threshold: usize,
 }
 impl SparseData {
-    pub fn new(file_size: i64, merge_batch_size: usize, realloc_threshold: usize) -> Self {
+    pub fn new(
+        file_size: i64,
+        max_loaded: usize,
+        merge_batch_size: usize,
+        realloc_threshold: usize,
+    ) -> Self {
         Self {
             segments: default(),
             file_size,
+            max_loaded,
             merge_batch_size,
             realloc_threshold,
         }
@@ -283,6 +291,79 @@ impl SparseData {
         }
     }
 
+    /// Clean up memory if we are over the target memory usage.
+    /// Only gurantees keeping the given offset range in memory.
+    pub fn cleanup(handle: SparseHandle, keep: ops::Range<i64>) {
+        lock_sparse!(handle, store, sparse);
+
+        let mut total_cap = 0;
+        for seg in sparse.segments.iter() {
+            total_cap += seg.data.capacity();
+        }
+        if total_cap > sparse.max_loaded {
+            let mut shrinked_by = 0;
+            // Free everything outside the keep range
+            sparse.segments.retain_mut(|s| {
+                // Remove the prefix that is outside `keep`
+                let lconsume = (keep.start - s.offset).clamp(0, s.data.len() as i64);
+                s.data.consume_left(lconsume as usize);
+                s.offset += lconsume;
+                // Remove the suffix that is outside `keep`
+                let rconsume =
+                    (keep.end - (s.offset + s.data.len() as i64)).clamp(0, s.data.len() as i64);
+                s.data.consume_right(rconsume as usize);
+                // Drop the segment if it is empty
+                if s.data.is_empty() {
+                    shrinked_by += s.data.capacity();
+                }
+                !s.data.is_empty()
+            });
+            // Free spare memory
+            // This might require some mutex-bumping for latency
+            for i in 0..sparse.segments.len() {
+                let s = &sparse.segments[i];
+                shrinked_by += s.data.capacity() - s.data.len();
+                if s.data.spare_left() > 0 && s.data.len() >= sparse.realloc_threshold {
+                    // Data is too large to relocate in one go
+                    // First, create a new copy with the exact needed size
+                    let size = s.data.len();
+                    let mut new;
+                    lock_sparse!(handle, store, sparse => unlocked {
+                        new = Demem::with_capacity(0, size);
+                    });
+                    // Then, copy live data to this new location
+                    while new.len() < size {
+                        let s = &sparse.segments[i];
+                        let batch_size = sparse.merge_batch_size.min(size - new.len());
+                        new.extend_right(&s.data[new.len()..new.len() + batch_size]);
+                        // Be mindful to keep bumping the mutex
+                        lock_sparse!(handle, store, sparse => bump);
+                    }
+                    // Finally, replace the old container with the new tight container
+                    // This will drop the old container and free its memory
+                    sparse.segments[i].data = new;
+                } else {
+                    // Data is small enough to shrink in one go
+                    sparse.segments[i].data.shrink_to_fit();
+                }
+            }
+            // Report shrinkage
+            println!(
+                "memory usage was at {:.3}/{:.3}MB, so {:.3}MB were freed",
+                total_cap as f64 / 1024. / 1024.,
+                sparse.max_loaded as f64 / 1024. / 1024.,
+                shrinked_by as f64 / 1024. / 1024.,
+            );
+            println!(
+                "the range at [{}, {}) was kept, leaving these segments:",
+                keep.start, keep.end
+            );
+            for s in sparse.segments.iter() {
+                println!("  [{}, {})", s.offset, s.offset + s.data.len() as i64);
+            }
+        }
+    }
+
     /// Find the longest contiguous segment of data starting at `at`.
     pub fn longest_contiguous(&self, at: i64) -> &[u8] {
         for s in self.segments.iter().rev() {
@@ -394,6 +475,17 @@ impl Demem {
     fn consume_right(&mut self, count: usize) {
         assert!(count <= self.len(), "consumed more than the length");
         self.mem.truncate(self.mem.len() - count);
+    }
+
+    /// Free any unused spare capacity.
+    fn shrink_to_fit(&mut self) {
+        if self.start > 0 {
+            let len = self.len();
+            self.mem.copy_within(self.start.., 0);
+            self.start = 0;
+            self.mem.truncate(len);
+            self.mem.shrink_to_fit();
+        }
     }
 
     fn spare_left(&self) -> usize {

@@ -163,6 +163,7 @@ impl FileManager {
     fn run(mut self) -> Result<()> {
         while !self.shared.stop.load() {
             // Find something to do
+            let keep;
             let ((l, r), store_data) = {
                 let mut loaded = self.shared.loaded.lock();
 
@@ -181,9 +182,12 @@ impl FileManager {
 
                 let start = Instant::now();
                 // Load data around the hot offset
+                let load_radius = self.shared.k.f.load_radius as i64;
+                let (keepl, _keepm, keepr) = loaded.get_hot_range();
+                keep = keepl - load_radius..keepr + load_radius;
                 let out = loaded.get_range_to_load(
                     self.shared.k.f.read_size as i64,
-                    self.shared.k.f.load_radius as i64,
+                    load_radius,
                     self.shared.k.f.max_selection_copy as i64,
                 );
                 let segn = loaded.data.segments.len();
@@ -204,7 +208,7 @@ impl FileManager {
                 if l % (16 * 1024 * 1024) > r % (16 * 1024 * 1024) {
                     eprintln!("loaded {:.2}MB", l as f64 / 1024. / 1024.);
                 }
-                self.load_segment(l, (r - l) as usize, store_data)?;
+                self.load_segment(l, (r - l) as usize, keep, store_data)?;
                 continue;
             }
             // Nothing to load, make sure to idle respectfully
@@ -216,7 +220,13 @@ impl FileManager {
         Ok(())
     }
 
-    fn load_segment(&mut self, offset: i64, len: usize, store_data: bool) -> Result<()> {
+    fn load_segment(
+        &mut self,
+        offset: i64,
+        len: usize,
+        keep: ops::Range<i64>,
+        store_data: bool,
+    ) -> Result<()> {
         let read_start = Instant::now();
 
         if self.read_buf.len() < len {
@@ -235,6 +245,7 @@ impl FileManager {
             let mut read_buf = mem::take(&mut self.read_buf);
             read_buf.truncate(len);
             SparseData::insert_data(&self.shared.loaded, offset, read_buf);
+            SparseData::cleanup(&self.shared.loaded, keep);
         }
 
         let finish = Instant::now();
@@ -324,7 +335,12 @@ impl FileBuffer {
                 k.f.migrate_batch_size,
             ),
             loaded: LoadedData {
-                data: SparseData::new(file_size, k.f.merge_batch_size, k.f.realloc_threshold),
+                data: SparseData::new(
+                    file_size,
+                    (k.f.max_loaded_mb * 1024. * 1024.).ceil() as usize,
+                    k.f.merge_batch_size,
+                    k.f.realloc_threshold,
+                ),
                 linemap: LineMap::new(file_size),
                 hot: default(),
                 sel: None,

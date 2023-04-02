@@ -75,6 +75,8 @@ segment_details = false
 lock_warn_ms = -1
 
 [file]
+# Place an upper limit on the amount of file data loaded at once in memory
+max_loaded_mb = 128
 # Control the amount of memory used to cache file offset <-> text position mappings
 # More memory speeds up rendering as characters can be looked up faster
 linemap_mem = { fract = 0.02, min_mb = 1, max_mb = 128 }
@@ -144,6 +146,7 @@ pub struct LineMapMem {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileLoading {
+    pub max_loaded_mb: f64,
     pub linemap_mem: LineMapMem,
     pub migrate_batch_size: usize,
     pub merge_batch_size: usize,
