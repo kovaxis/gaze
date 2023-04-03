@@ -14,7 +14,11 @@ use crate::{
 
 use super::Drag;
 
-pub fn draw_withtext(state: &mut WindowState, fview: &mut FileView) -> Result<()> {
+pub fn draw_withtext(
+    state: &mut WindowState,
+    fview: &mut FileView,
+    ctx: &mut FrameCtx,
+) -> Result<()> {
     // Lock the shared file data
     // We want to do this only once, to minimize latency
     let mut file = fview.file.lock();
@@ -37,7 +41,10 @@ pub fn draw_withtext(state: &mut WindowState, fview: &mut FileView) -> Result<()
     }
 
     // Transform the selected area from position to absolute offsets
-    let selected = fview.selected_range(&file);
+    let selection = fview.selected_range(&file);
+    let sel_offsets = selection
+        .as_ref()
+        .map(|(f, s)| f.offset.min(s.offset)..f.offset.max(s.offset));
 
     // Iterate over all characters on the screen and queue them up for rendering
     let mut linenum_buf = String::new();
@@ -73,7 +80,7 @@ pub fn draw_withtext(state: &mut WindowState, fview: &mut FileView) -> Result<()
                     state
                         .draw
                         .sel_vbo
-                        .push_quad(sel_box, state.k.g.selection_color);
+                        .push_quad(sel_box, state.k.g.selection_bg_color);
                 }
                 let y = text_view.min.y
                     + (dy as f64 - fview.scroll.pos.delta_y) as f32 * state.k.g.font_height
@@ -93,28 +100,33 @@ pub fn draw_withtext(state: &mut WindowState, fview: &mut FileView) -> Result<()
                     )
                     .as_vec2()
                         * state.k.g.font_height;
-                // Create and queue the glyph
-                let g = Glyph {
-                    id: state.draw.font.glyph_id(char::from_u32(c).unwrap_or('\0')),
-                    scale: state.k.g.font_height.into(),
-                    position: pos.to_array().into(),
-                };
-                state
-                    .draw
-                    .text
-                    .push(&mut state.draw.glyphs, state.k.g.text_color, g);
                 // If the character is selected, make sure the selection box wraps it
-                if selected
+                let is_sel = sel_offsets
                     .as_ref()
                     .map(|r| r.start <= offset && offset < r.end)
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(false);
+                if is_sel {
                     sel_box.min.x = sel_box.min.x.min(pos.x);
                     sel_box.max.x = sel_box
                         .max
                         .x
                         .max(pos.x + hadv as f32 * state.k.g.font_height);
                 }
+                // Create and queue the glyph
+                let g = Glyph {
+                    id: state.draw.font.glyph_id(char::from_u32(c).unwrap_or('\0')),
+                    scale: state.k.g.font_height.into(),
+                    position: pos.to_array().into(),
+                };
+                state.draw.text.push(
+                    &mut state.draw.glyphs,
+                    if is_sel {
+                        state.k.g.selection_color
+                    } else {
+                        state.k.g.text_color
+                    },
+                    g,
+                );
             }
         }
     });
@@ -123,7 +135,32 @@ pub fn draw_withtext(state: &mut WindowState, fview: &mut FileView) -> Result<()
             state
                 .draw
                 .sel_vbo
-                .push_quad(sel_box, state.k.g.selection_color);
+                .push_quad(sel_box, state.k.g.selection_bg_color);
+        }
+    }
+
+    // Draw cursor
+    if let Some((_f, s)) = selection {
+        let (visible, next) = fview.selected.check_blink(&state.k);
+        ctx.schedule_redraw(next);
+        if visible {
+            let pos = text_view.min
+                + dvec2(
+                    s.dx - fview.scroll.pos.delta_x,
+                    s.dy as f64 - fview.scroll.pos.delta_y + state.k.g.selection_offset as f64,
+                )
+                .as_vec2()
+                    * state.k.g.font_height;
+            state.draw.aux_vbo.push_quad(
+                ScreenRect {
+                    min: vec2(pos.x - state.k.g.cursor_width / 2., pos.y),
+                    max: vec2(
+                        pos.x + state.k.g.cursor_width / 2.,
+                        pos.y + state.k.g.font_height,
+                    ),
+                },
+                state.k.g.cursor_color,
+            );
         }
     }
 
@@ -133,7 +170,7 @@ pub fn draw_withtext(state: &mut WindowState, fview: &mut FileView) -> Result<()
     }
 
     // Do any bookkeeping that requires the lock
-    fview.bookkeep_file(state, &mut file, selected);
+    fview.bookkeep_file(state, &mut file, sel_offsets);
 
     Ok(())
 }

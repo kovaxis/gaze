@@ -4,7 +4,7 @@ use drawing::DrawState;
 use fileview::FileView;
 use gl::{
     glutin::event_loop::ControlFlow,
-    winit::event::{ElementState, MouseButton, VirtualKeyCode},
+    winit::event::{ElementState, MouseButton, StartCause, VirtualKeyCode},
     *,
 };
 
@@ -193,6 +193,7 @@ impl WindowState {
 
     fn handle_event(&mut self, ev: gl::winit::event::Event<()>, flow: &mut ControlFlow) {
         use gl::winit::event::{Event, WindowEvent};
+        //eprintln!("event: {:?}, flow: {:?}", ev, flow);
         // Dispatch event to active file view
         if let Some(mut fview) = self.take_fview(self.cur_tab) {
             fview.handle_event(self, &ev);
@@ -258,11 +259,23 @@ impl WindowState {
                 WindowEvent::DroppedFile(path) => self.try_load_file(path),
                 _ => {}
             },
-            Event::RedrawRequested(_) => {
-                if let Err(err) = drawing::draw(self) {
+            Event::NewEvents(cause) => match cause {
+                StartCause::ResumeTimeReached { .. } => {
+                    self.redraw();
+                }
+                _ => {}
+            },
+            Event::RedrawRequested(_) => match drawing::draw(self) {
+                Ok(next_draw) => {
+                    *flow = match next_draw {
+                        Some(nxt) => ControlFlow::WaitUntil(nxt),
+                        None => ControlFlow::Wait,
+                    };
+                }
+                Err(err) => {
                     println!("error drawing frame: {:#}", err);
                 }
-            }
+            },
             _ => {}
         }
     }
@@ -344,7 +357,6 @@ fn main() -> Result<()> {
     gl_run_loop(
         evloop,
         Box::new(move |ev, flow| {
-            *flow = ControlFlow::Wait;
             state.handle_event(ev, flow);
         }),
     )

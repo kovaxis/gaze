@@ -46,8 +46,10 @@ linenum_color = [102, 102, 102, 255]
 text_color = [255, 255, 255, 255]
 # Background color.
 bg_color = [3, 3, 4, 255]
-# Overlay color of selected text
-selection_color = [10, 10, 180, 255]
+# Color of selected text
+selection_color = [0, 0, 0, 255]
+# Color of selected text highlight
+selection_bg_color = [20, 20, 210, 255]
 # Y offset applied to the selection highlight, proportional to the font height.
 selection_offset = 0.2
 # Color of the scrollbar background.
@@ -78,6 +80,12 @@ tab_bg_color = [10, 10, 10, 255]
 tab_fg_color = [[30, 30, 30, 255], [20, 20, 20, 255]]
 # Text color of active/inactive tabs
 tab_text_color = [[255, 255, 255, 255], [128, 128, 128, 255]]
+# Width of the cursor bar, in pixels.
+cursor_width = 2
+# Color of the cursor bar.
+cursor_color = [255, 255, 255, 255]
+# Cursor blink half-period, in seconds.
+cursor_blink = 0.5
 
 [log]
 # Log the time that each rendering stage takes
@@ -139,6 +147,7 @@ pub struct Visual {
     pub text_color: [u8; 4],
     pub bg_color: [u8; 4],
     pub selection_color: [u8; 4],
+    pub selection_bg_color: [u8; 4],
     pub selection_offset: f32,
     pub scrollbar_color: [u8; 4],
     pub scrollhandle_color: [u8; 4],
@@ -153,6 +162,9 @@ pub struct Visual {
     pub tab_bg_color: [u8; 4],
     pub tab_fg_color: [[u8; 4]; 2],
     pub tab_text_color: [[u8; 4]; 2],
+    pub cursor_width: f32,
+    pub cursor_color: [u8; 4],
+    pub cursor_blink: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

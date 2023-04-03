@@ -272,6 +272,7 @@ pub struct FrameCtx {
     pub frame: ManuallyDrop<Frame>,
     pub size: (u32, u32),
     pub mvp: Mat4,
+    pub next_redraw: Option<Instant>,
 }
 impl FrameCtx {
     fn into_frame(mut self) -> Frame {
@@ -280,6 +281,13 @@ impl FrameCtx {
             let frame = ManuallyDrop::take(&mut self.frame);
             mem::forget(self);
             frame
+        }
+    }
+
+    pub fn schedule_redraw(&mut self, at: Instant) {
+        match &mut self.next_redraw {
+            Some(next) => *next = (*next).min(at),
+            nxt @ None => *nxt = Some(at),
         }
     }
 }
@@ -294,10 +302,8 @@ impl Drop for FrameCtx {
     }
 }
 
-/// Returns `true` if the backend is still loading and it would
-/// be good to redraw after a certain timeout to include newly
-/// loaded data.
-pub fn draw(state: &mut WindowState) -> Result<()> {
+/// May return an instant specifying when is the next redraw due.
+pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
     // Initialize frame
     let frame = state.display.draw();
     let (w, h) = frame.get_dimensions();
@@ -309,6 +315,7 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
         frame: mem::ManuallyDrop::new(frame),
         size: (w, h),
         mvp: Mat4::orthographic_rh_gl(0., w as f32, h as f32, 0., -1., 1.),
+        next_redraw: None,
     };
 
     // Reset frame
@@ -326,7 +333,7 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
 
     // Draw file text, and anything else that requires locking the shared file block
     if let Some(mut fview) = state.take_fview(state.cur_tab) {
-        crate::fileview::drawing::draw_withtext(state, &mut fview)?;
+        crate::fileview::drawing::draw_withtext(state, &mut fview, &mut ctx)?;
         state.put_fview(state.cur_tab, fview);
     }
 
@@ -471,7 +478,8 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
     )?;
 
     // Swap frame (possibly waiting for vsync)
+    let next_redraw = ctx.next_redraw;
     ctx.into_frame().finish()?;
 
-    Ok(())
+    Ok(next_redraw)
 }

@@ -5,7 +5,7 @@ use gl::winit::event::MouseScrollDelta;
 use crate::{
     cfg::Cfg,
     elem2bool,
-    filebuf::{CharLayout, FileLock, FilePos, FileRect},
+    filebuf::{CharLayout, DataAt, FileLock, FilePos, FileRect},
     mouse2id,
     prelude::*,
     ScreenRect, WindowState,
@@ -142,6 +142,26 @@ pub struct Selected {
     /// Whether the second position has been set down or if it is
     /// still in flux.
     pub second_set: bool,
+    /// The last modification time of the selection.
+    /// Used for cursor blink.
+    pub mod_time: Instant,
+}
+impl Selected {
+    /// Mark the selection as modified.
+    /// This resets the cursor blink modifier.
+    fn touch(&mut self) {
+        self.mod_time = Instant::now();
+    }
+
+    /// Returns whether the cursor is visible right now, and the next
+    /// instant at which its visibility will change if it is not modified.
+    fn check_blink(&self, k: &Cfg) -> (bool, Instant) {
+        let half = k.g.cursor_blink;
+        let time = self.mod_time.elapsed().as_secs_f64() / half;
+        let visible = (time * 0.5).fract() < 0.5;
+        let next = Instant::now() + Duration::from_secs_f64((time.ceil() - time) * half);
+        (visible, next)
+    }
 }
 
 enum Drag {
@@ -215,6 +235,7 @@ impl FileView {
                 first: default(),
                 second: default(),
                 second_set: true,
+                mod_time: Instant::now(),
             },
             send_sel_copy: false.into(),
         })
@@ -222,15 +243,12 @@ impl FileView {
 
     /// Get the selected range as absolute offsets.
     /// The range might not be resolvable if the relevant offsets have been unloaded.
-    fn selected_range(&self, file: &FileLock) -> Option<ops::Range<i64>> {
+    fn selected_range<'a>(&self, file: &'a FileLock) -> Option<(DataAt<'a>, DataAt<'a>)> {
         let (fo, fy, fx) = self.selected.first.floor();
-        let mut first = file.lookup_pos(fo, fy, fx, 0.5)?;
+        let first = file.lookup_pos(fo, fy, fx, 0.5)?;
         let (so, sy, sx) = self.selected.second.floor();
-        let mut second = file.lookup_pos(so, sy, sx, 0.5)?;
-        if second.offset < first.offset {
-            mem::swap(&mut first, &mut second);
-        }
-        Some(first.offset..second.offset)
+        let second = file.lookup_pos(so, sy, sx, 0.5)?;
+        Some((first, second))
     }
 
     fn text_view(k: &Cfg, view: ScreenRect) -> ScreenRect {
@@ -305,6 +323,7 @@ impl FileView {
                         first: pos,
                         second: pos,
                         second_set: false,
+                        mod_time: Instant::now(),
                     };
                     state.redraw();
                     return;
@@ -386,10 +405,14 @@ impl FileView {
         }
         // Tick selection moves
         if !self.selected.second_set {
-            self.selected.second =
-                self.scroll
-                    .screen_to_file_pos(&state.k, self.view, state.last_mouse_pos);
-            state.redraw();
+            let newpos = self
+                .scroll
+                .screen_to_file_pos(&state.k, self.view, state.last_mouse_pos);
+            if newpos != self.selected.second {
+                self.selected.second = newpos;
+                self.selected.touch();
+                state.redraw();
+            }
         }
     }
 
