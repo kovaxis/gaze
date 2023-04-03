@@ -23,11 +23,13 @@ fn init(fsize: i64, max_mem: usize) -> TestInst {
             pending_sel_copy: false,
             warn_time: None,
         }),
-        linemapper: LineMapper::new(&font, fsize, max_mem, 1024),
+        linemapper: LineMapper::new(CharLayout::new(&font), fsize, max_mem, 1024),
     }
 }
 
 use rand::{seq::SliceRandom, Rng, SeedableRng};
+
+use super::CharLayout;
 
 type TestRng = rand_xoshiro::Xoshiro256StarStar;
 
@@ -97,7 +99,7 @@ fn assert_full_data_loaded(t: &TestInst, data: &[u8]) {
                 println!("char {} is newline", c_i);
             }
             c => {
-                x += t.linemapper.advance_for(c);
+                x += t.linemapper.layout.advance_for(c);
                 println!("char [{}, {}) uses x [{}, {})", c_i, idx, x_i, x);
             }
         }

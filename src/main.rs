@@ -2,7 +2,11 @@ use crate::prelude::*;
 use cfg::Cfg;
 use drawing::DrawState;
 use fileview::FileView;
-use gl::{glutin::event_loop::ControlFlow, winit::event::ElementState, *};
+use gl::{
+    glutin::event_loop::ControlFlow,
+    winit::event::{ElementState, MouseButton},
+    *,
+};
 
 mod prelude {
     pub(crate) use crate::filebuf::FileBuffer;
@@ -49,13 +53,38 @@ pub struct WindowState {
     tabs: Vec<Box<FileView>>,
     k: Cfg,
     last_mouse_pos: Vec2,
-    last_size: (u32, u32),
+    screen: ScreenRect,
     ctrl_down: bool,
     focused: bool,
 }
 impl WindowState {
     fn redraw(&self) {
         self.display.gl_window().window().request_redraw();
+    }
+
+    fn tab_bar_bounds(k: &Cfg, screen: ScreenRect) -> ScreenRect {
+        ScreenRect {
+            min: screen.min,
+            max: vec2(screen.max.x, screen.min.y + k.g.tab_height),
+        }
+    }
+
+    fn tab_bounds(k: &Cfg, i: usize, n: usize, screen: ScreenRect) -> ScreenRect {
+        let bar = Self::tab_bar_bounds(k, screen);
+        let w = ((bar.size().x + k.g.tab_gap) / n as f32 - k.g.tab_gap)
+            .clamp(k.g.tab_width[0], k.g.tab_width[1]);
+        let x = i as f32 * (w + k.g.tab_gap);
+        ScreenRect {
+            min: bar.min + vec2(x, 0.),
+            max: vec2(bar.min.x + x + w, bar.max.y),
+        }
+    }
+
+    fn fileview_bounds(k: &Cfg, screen: ScreenRect) -> ScreenRect {
+        ScreenRect {
+            min: screen.min + vec2(0., k.g.tab_height),
+            max: screen.max,
+        }
     }
 
     fn take_fview(&mut self, idx: usize) -> Option<Box<FileView>> {
@@ -73,13 +102,50 @@ impl WindowState {
     }
 
     fn resize(&mut self, (w, h): (u32, u32)) {
+        self.screen = ScreenRect {
+            min: vec2(0., 0.),
+            max: vec2(w as f32, h as f32),
+        };
+        let bounds = Self::fileview_bounds(&self.k, self.screen);
         for i in 0..self.tabs.len() {
             let mut fview = self.take_fview(i).unwrap();
-            fview.reposition(ScreenRect {
-                min: vec2(10., 10.),
-                max: vec2(w as f32 - 10., h as f32 - 10.),
-            });
+            fview.reposition(bounds);
             self.put_fview(i, fview);
+        }
+    }
+
+    fn select_tab(&mut self, i: usize) {
+        if i == self.cur_tab {
+            return;
+        }
+        if let Some(tab) = self.tabs.get_mut(self.cur_tab) {
+            tab.unfocus();
+        }
+        self.cur_tab = i;
+        self.redraw();
+    }
+
+    fn kill_tab(&mut self, i: usize) {
+        if i < self.tabs.len() {
+            self.tabs.remove(i);
+            if self.cur_tab > 0 && self.cur_tab == self.tabs.len() {
+                self.cur_tab -= 1;
+            }
+            self.redraw();
+        }
+    }
+
+    fn handle_tab_click(&mut self, button: u16, down: bool) {
+        for i in 0..self.tabs.len() {
+            let tab_bounds = Self::tab_bounds(&self.k, i, self.tabs.len(), self.screen);
+            if tab_bounds.is_inside(self.last_mouse_pos) {
+                // Clicked this tab
+                if down && button == self.k.ui.tab_select_button {
+                    self.select_tab(i);
+                } else if down && button == self.k.ui.tab_kill_button {
+                    self.kill_tab(i);
+                }
+            }
         }
     }
 
@@ -103,6 +169,16 @@ impl WindowState {
                         _ => {}
                     }
                 }
+                WindowEvent::MouseInput {
+                    state: st, button, ..
+                } => {
+                    let button = mouse2id(button);
+                    let down = elem2bool(st);
+                    let tabs_bounds = Self::tab_bar_bounds(&self.k, self.screen);
+                    if tabs_bounds.is_inside(self.last_mouse_pos) {
+                        self.handle_tab_click(button, down);
+                    }
+                }
                 WindowEvent::CursorMoved { position, .. } => {
                     self.last_mouse_pos = dvec2(position.x, position.y).as_vec2();
                 }
@@ -122,6 +198,15 @@ impl WindowState {
 
 fn elem2bool(e: ElementState) -> bool {
     e == ElementState::Pressed
+}
+
+fn mouse2id(m: MouseButton) -> u16 {
+    match m {
+        MouseButton::Left => 0,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Other(b) => b,
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -163,16 +248,19 @@ fn main() -> Result<()> {
     let font = FontArc::try_from_vec(fs::read("font.ttf").context("failed to read font file")?)?;
     let k = Cfg::load_or_new();
 
-    let path = PathBuf::from(
-        std::env::args_os()
-            .nth(1)
-            .ok_or(anyhow!("expected file to open as argument"))?,
-    );
+    let mut tabs = vec![];
+    for path in std::env::args_os().skip(1) {
+        let path = Path::new(&path);
+        tabs.push(Box::new(FileView::new(&k, &font, path)?));
+    }
     let mut state = WindowState {
-        tabs: vec![Box::new(FileView::new(&k, &font, path.as_path())?)],
+        tabs,
         cur_tab: 0,
         last_mouse_pos: Vec2::ZERO,
-        last_size: (1, 1),
+        screen: ScreenRect {
+            min: vec2(0., 0.),
+            max: vec2(1., 1.),
+        },
         ctrl_down: false,
         focused: false,
         draw: DrawState::new(&display, &font, &k)?,

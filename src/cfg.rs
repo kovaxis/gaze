@@ -28,6 +28,10 @@ slide_base_dist = 0.10
 slide_double_dist = 0.055
 # Button used to select text
 select_button = 0
+# Button used to switch between tabs.
+tab_select_button = 0
+# Button used to kill tabs.
+tab_kill_button = 2
 
 [visual]
 # Height in pixels of a line of text.
@@ -58,6 +62,22 @@ scrollbar_width = 18
 scrollhandle_min_size = 10
 # Icon shown while scroll-sliding.
 slide_icon = { radius = 24, detail = 20, bg = [255, 255, 255, 255], fg = [0, 0, 0, 255], arrow_shift = 14, arrow_size = 7 }
+# Height of the tabs.
+tab_height = 24
+# Minimum/maximum tab width.
+tab_width = [64, 128]
+# Gap between tabs.
+tab_gap = 2
+# Height of the tab title font.
+tab_font_height = 16
+# Top/right/bottom/left tab title margins.
+tab_padding = [4, 4, 4, 4]
+# Background color of the tabs bar
+tab_bg_color = [10, 10, 10, 255]
+# Background color of active/inactive tabs
+tab_fg_color = [[30, 30, 30, 255], [20, 20, 20, 255]]
+# Text color of active/inactive tabs
+tab_text_color = [[255, 255, 255, 255], [128, 128, 128, 255]]
 
 [log]
 # Log the time that each rendering stage takes
@@ -126,6 +146,13 @@ pub struct Visual {
     pub scrollbar_width: f32,
     pub scrollhandle_min_size: f32,
     pub slide_icon: SlideIcon,
+    pub tab_height: f32,
+    pub tab_width: [f32; 2],
+    pub tab_gap: f32,
+    pub tab_padding: [f32; 4],
+    pub tab_bg_color: [u8; 4],
+    pub tab_fg_color: [[u8; 4]; 2],
+    pub tab_text_color: [[u8; 4]; 2],
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -175,6 +202,8 @@ pub struct Ui {
     pub slide_base_dist: f64,
     pub slide_double_dist: f64,
     pub select_button: u16,
+    pub tab_select_button: u16,
+    pub tab_kill_button: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

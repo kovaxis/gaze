@@ -4,7 +4,7 @@ use crate::{cfg::Cfg, prelude::*, ScreenRect, WindowState};
 use ab_glyph::Glyph;
 use gl::glium::{
     index::{IndicesSource, PrimitiveType},
-    uniforms::Uniforms,
+    uniforms::{MagnifySamplerFilter, MinifySamplerFilter, Uniforms},
     vertex::VertexBufferSlice,
     Blend, DrawParameters, Frame, Program, Surface, Texture2d, VertexBuffer,
 };
@@ -152,7 +152,7 @@ impl VertexBuf<FlatVertex> {
 }
 
 pub struct TextScope {
-    queue: Vec<Glyph>,
+    queue: Vec<(Glyph, [u8; 4])>,
     buf: VertexBuf<TextVertex>,
 }
 impl TextScope {
@@ -168,26 +168,21 @@ impl TextScope {
         self.buf.clear();
     }
 
-    pub fn push(&mut self, cache: &mut DrawCache, g: Glyph) {
-        self.queue.push(g.clone());
+    pub fn push(&mut self, cache: &mut DrawCache, color: [u8; 4], g: Glyph) {
+        self.queue.push((g.clone(), color));
         cache.queue_glyph(0, g);
     }
 
-    pub fn upload_verts(
-        &mut self,
-        color: [u8; 4],
-        cache: &mut DrawCache,
-        display: &Display,
-    ) -> Result<()> {
+    pub fn upload_verts(&mut self, cache: &mut DrawCache, display: &Display) -> Result<()> {
         // Process the glyph queue and generate vertices/indices
-        for g in self.queue.iter() {
+        for (g, color) in self.queue.iter() {
             if let Some((tex, pos)) = cache.rect_for(0, g) {
                 macro_rules! vert {
                     ($x:ident, $y:ident) => {{
                         self.buf.push(TextVertex {
                             pos: [pos.$x.x, pos.$y.y],
                             uv: [tex.$x.x, tex.$y.y],
-                            color,
+                            color: *color,
                         });
                     }};
                 }
@@ -249,6 +244,7 @@ pub struct DrawState {
     pub flat_shader: Program,
     pub slide_icon: Vec<FlatVertex>,
     pub aux_vbo: VertexBuf<FlatVertex>,
+    pub aux_text: TextScope,
 }
 impl DrawState {
     pub fn new(display: &Display, font: &FontArc, k: &Cfg) -> Result<Self> {
@@ -267,6 +263,7 @@ impl DrawState {
             flat_shader: load_shader(display, "flat")?,
             slide_icon: VertexBuf::build_slide_icon(k),
             aux_vbo: VertexBuf::new(display)?,
+            aux_text: TextScope::new(display)?,
         })
     }
 }
@@ -301,30 +298,57 @@ impl Drop for FrameCtx {
 /// be good to redraw after a certain timeout to include newly
 /// loaded data.
 pub fn draw(state: &mut WindowState) -> Result<()> {
+    // Initialize frame
     let frame = state.display.draw();
     let (w, h) = frame.get_dimensions();
+    state.screen = ScreenRect {
+        min: vec2(0., 0.),
+        max: vec2(w as f32, h as f32),
+    };
     let mut ctx = FrameCtx {
         frame: mem::ManuallyDrop::new(frame),
         size: (w, h),
         mvp: Mat4::orthographic_rh_gl(0., w as f32, h as f32, 0., -1., 1.),
     };
 
+    // Reset frame
     {
         let [r, g, b, a] = state.k.g.bg_color;
         let s = 255f32.recip();
         ctx.frame
             .clear_color(r as f32 * s, g as f32 * s, b as f32 * s, a as f32 * s);
     }
-    state.last_size = (w, h);
-
     state.draw.text.clear();
     state.draw.linenums.clear();
     state.draw.sel_vbo.clear();
     state.draw.aux_vbo.clear();
+    state.draw.aux_text.clear();
 
+    // Draw file text, and anything else that requires locking the shared file block
     if let Some(mut fview) = state.take_fview(state.cur_tab) {
         crate::fileview::drawing::draw_withtext(state, &mut fview)?;
         state.put_fview(state.cur_tab, fview);
+    }
+
+    // Draw the tab list
+    {
+        let tabs_view = WindowState::tab_bar_bounds(&state.k, state.screen);
+        state
+            .draw
+            .aux_vbo
+            .push_quad(tabs_view, state.k.g.tab_bg_color);
+
+        for (i, _tab) in state.tabs.iter().enumerate() {
+            let active = i == state.cur_tab;
+            let active_idx = (!active) as usize;
+            let tab_view = WindowState::tab_bounds(&state.k, i, state.tabs.len(), state.screen);
+            // let [top, rt, bot, lt] = state.k.g.tab_padding;
+            // let fonth = state.k.g.tab_height - top - bot;
+            state
+                .draw
+                .aux_vbo
+                .push_quad(tab_view, state.k.g.tab_fg_color[active_idx]);
+        }
     }
 
     // Process the queued glyphs, uploading their rasterized images to the GPU
@@ -356,12 +380,15 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
     state
         .draw
         .text
-        .upload_verts(state.k.g.text_color, &mut state.draw.glyphs, &state.display)?;
-    state.draw.linenums.upload_verts(
-        state.k.g.linenum_color,
-        &mut state.draw.glyphs,
-        &state.display,
-    )?;
+        .upload_verts(&mut state.draw.glyphs, &state.display)?;
+    state
+        .draw
+        .linenums
+        .upload_verts(&mut state.draw.glyphs, &state.display)?;
+    state
+        .draw
+        .aux_text
+        .upload_verts(&mut state.draw.glyphs, &state.display)?;
 
     // Draw non-text file view components
     if let Some(mut fview) = state.take_fview(state.cur_tab) {
@@ -377,6 +404,22 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
         &state.draw.flat_shader,
         &gl::glium::uniform! {
             tint: [1f32; 4],
+            mvp: ctx.mvp.to_cols_array_2d(),
+        },
+        &DrawParameters {
+            blend: Blend::alpha_blending(),
+            ..default()
+        },
+    )?;
+
+    // Draw the text overlay above decorations
+    state.draw.aux_text.draw(
+        &mut ctx.frame,
+        &state.draw.text_shader,
+        &gl::glium::uniform! {
+            glyph: state.draw.texture.sampled()
+                .magnify_filter(MagnifySamplerFilter::Nearest)
+                .minify_filter(MinifySamplerFilter::Nearest),
             mvp: ctx.mvp.to_cols_array_2d(),
         },
         &DrawParameters {

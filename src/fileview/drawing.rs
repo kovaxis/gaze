@@ -57,9 +57,10 @@ pub fn draw_withtext(state: &mut WindowState, fview: &mut FileView) -> Result<()
                 let y = text_view.min.y
                     + ((dy + 1) as f64 - fview.scroll.pos.delta_y) as f32 * state.k.g.font_height;
                 for c in linenum_buf.bytes().rev() {
-                    x -= fview.file.advance_for(c as u32) as f32 * state.k.g.font_height;
+                    x -= fview.file.layout().advance_for(c as u32) as f32 * state.k.g.font_height;
                     state.draw.linenums.push(
                         &mut state.draw.glyphs,
+                        state.k.g.linenum_color,
                         Glyph {
                             id: state.draw.font.glyph_id(c as char),
                             scale: state.k.g.font_height.into(),
@@ -98,7 +99,10 @@ pub fn draw_withtext(state: &mut WindowState, fview: &mut FileView) -> Result<()
                     scale: state.k.g.font_height.into(),
                     position: pos.to_array().into(),
                 };
-                state.draw.text.push(&mut state.draw.glyphs, g);
+                state
+                    .draw
+                    .text
+                    .push(&mut state.draw.glyphs, state.k.g.text_color, g);
                 // If the character is selected, make sure the selection box wraps it
                 if selected
                     .as_ref()

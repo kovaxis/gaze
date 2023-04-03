@@ -1,10 +1,8 @@
 use std::collections::VecDeque;
 
-use ab_glyph::Font;
-
 use crate::prelude::*;
 
-use super::{FilePos, FileRect, LoadedData, LoadedDataGuard, Surroundings};
+use super::{CharLayout, FilePos, FileRect, LoadedData, LoadedDataGuard, Surroundings};
 
 /// There are two diferent "coordinate systems" in a text file:
 /// - Raw byte offset
@@ -177,15 +175,14 @@ macro_rules! lock_linemap {
 pub struct LineMapper {
     pub(super) bytes_per_anchor: usize,
     pub(super) migrate_batch_size: usize,
-    pub(super) char_adv: FxHashMap<u32, f32>,
-    pub(super) default_char_adv: f32,
+    pub(super) layout: CharLayout,
 }
 impl LineMapper {
     pub const REPLACEMENT_CHAR: u32 = char::REPLACEMENT_CHARACTER as u32;
     pub const NEWLINE: u32 = '\n' as u32;
 
     pub fn new(
-        font: &FontArc,
+        layout: CharLayout,
         file_size: i64,
         max_memory: usize,
         migrate_batch_size: usize,
@@ -195,24 +192,12 @@ impl LineMapper {
             .expect("file too large")
             .max(mem::size_of::<Anchor>()); // reasonable minimum
         println!("spreading anchors {} bytes apart", bytes_per_anchor);
-        let font_h = font.height_unscaled();
-        let mut char_adv: FxHashMap<u32, f32> = default();
-        char_adv.reserve(font.glyph_count());
-        for (glyph, c) in font.codepoint_ids() {
-            char_adv.insert(c as u32, font.h_advance_unscaled(glyph) / font_h);
-        }
-        println!("got {} char -> hadvance mappings", char_adv.len());
+
         Self {
-            char_adv,
-            default_char_adv: font.h_advance_unscaled(font.glyph_id('\0')) / font_h,
+            layout,
             bytes_per_anchor,
             migrate_batch_size,
         }
-    }
-
-    /// Receives a relaxed Unicode codepoint
-    pub fn advance_for(&self, c: u32) -> f64 {
-        *self.char_adv.get(&c).unwrap_or(&self.default_char_adv) as f64
     }
 
     /// Note: A prefix and/or suffix of at most length 3 may be discarded from the given
@@ -296,7 +281,7 @@ impl LineMapper {
                     abs_x = true;
                 }
                 c => {
-                    cur_x += self.advance_for(c);
+                    cur_x += self.layout.advance_for(c);
                 }
             }
         }

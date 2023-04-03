@@ -5,7 +5,8 @@ use gl::winit::event::{MouseButton, MouseScrollDelta};
 use crate::{
     cfg::Cfg,
     elem2bool,
-    filebuf::{FileLock, FilePos, FileRect},
+    filebuf::{CharLayout, FileLock, FilePos, FileRect},
+    mouse2id,
     prelude::*,
     ScreenRect, WindowState,
 };
@@ -203,7 +204,7 @@ pub struct FileView {
 impl FileView {
     pub fn new(k: &Cfg, font: &FontArc, path: &Path) -> Result<FileView> {
         Ok(Self {
-            file: FileBuffer::open(path, font, k.clone())
+            file: FileBuffer::open(path, CharLayout::new(font), k.clone())
                 .with_context(|| anyhow!("failed to open file at \"{}\"", path.display()))?,
             view: ScreenRect {
                 min: vec2(0., 0.),
@@ -462,12 +463,7 @@ impl FileView {
                 WindowEvent::MouseInput {
                     state: st, button, ..
                 } => {
-                    let button = match button {
-                        MouseButton::Left => 0,
-                        MouseButton::Right => 1,
-                        MouseButton::Middle => 2,
-                        &MouseButton::Other(b) => b,
-                    };
+                    let button = mouse2id(*button);
                     let down = elem2bool(*st);
                     self.handle_drag(state, button, down);
                 }

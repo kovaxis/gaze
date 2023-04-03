@@ -1,4 +1,4 @@
-use ab_glyph::FontArc;
+use ab_glyph::{Font, FontArc};
 
 use crate::{
     cfg::Cfg,
@@ -297,6 +297,32 @@ impl FileManager {
     }
 }
 
+#[derive(Clone)]
+pub struct CharLayout {
+    char_adv: FxHashMap<u32, f32>,
+    default_adv: f32,
+}
+impl CharLayout {
+    pub fn new(font: &FontArc) -> Self {
+        let font_h = font.height_unscaled();
+        let mut char_adv: FxHashMap<u32, f32> = default();
+        char_adv.reserve(font.glyph_count());
+        for (glyph, c) in font.codepoint_ids() {
+            char_adv.insert(c as u32, font.h_advance_unscaled(glyph) / font_h);
+        }
+        println!("got {} char -> hadvance mappings", char_adv.len());
+        Self {
+            default_adv: font.h_advance_unscaled(font.glyph_id('\0')) / font_h,
+            char_adv,
+        }
+    }
+
+    /// Get the horizontal advance distance for the given unicode codepoint.
+    pub fn advance_for(&self, codepoint: u32) -> f64 {
+        *self.char_adv.get(&codepoint).unwrap_or(&self.default_adv) as f64
+    }
+}
+
 pub struct FileBuffer {
     manager: JoinHandle<Result<()>>,
     shared: Arc<Shared>,
@@ -311,7 +337,7 @@ impl Drop for FileBuffer {
     }
 }
 impl FileBuffer {
-    pub fn open(path: &Path, font: &FontArc, k: Cfg) -> Result<FileBuffer> {
+    pub fn open(path: &Path, layout: CharLayout, k: Cfg) -> Result<FileBuffer> {
         // TODO: Do not do file IO on the main thread
         // This requires the file size to be set to 0 for a while
         let mut file = File::open(path)?;
@@ -330,7 +356,7 @@ impl FileBuffer {
             stop: false.into(),
             sleeping: false.into(),
             linemapper: LineMapper::new(
-                font,
+                layout,
                 file_size,
                 max_linemap_memory,
                 k.f.migrate_batch_size,
@@ -374,8 +400,8 @@ impl FileBuffer {
         self.shared.file_size
     }
 
-    pub fn advance_for(&self, c: u32) -> f64 {
-        self.shared.linemapper.advance_for(c)
+    pub fn layout(&self) -> &CharLayout {
+        &self.shared.linemapper.layout
     }
 }
 
@@ -439,7 +465,7 @@ impl FileLock<'_> {
                     dx = 0.;
                 }
                 c => {
-                    let hadv = self.filebuf.advance_for(c);
+                    let hadv = self.filebuf.layout().advance_for(c);
                     if dy == y && dx + hadv * hdiv > x {
                         break;
                     }
@@ -482,7 +508,7 @@ impl FileLock<'_> {
                         break;
                     }
                     c => {
-                        let hadv = self.filebuf.advance_for(c);
+                        let hadv = self.filebuf.layout().advance_for(c);
                         on_char_or_line(data.offset, data.dx, data.dy, Some((c, hadv)));
                         data.dx += hadv;
                     }
