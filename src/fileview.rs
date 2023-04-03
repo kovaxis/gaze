@@ -1,6 +1,6 @@
 //! Handles user input and drawing of a file into a rectangle of the screen.
 
-use gl::winit::event::{MouseButton, MouseScrollDelta};
+use gl::winit::event::MouseScrollDelta;
 
 use crate::{
     cfg::Cfg,
@@ -194,7 +194,7 @@ impl Drag {
 }
 
 pub struct FileView {
-    file: FileBuffer,
+    pub file: FileBuffer,
     view: ScreenRect,
     send_sel_copy: Cell<bool>,
     scroll: ScrollManager,
@@ -204,7 +204,7 @@ pub struct FileView {
 impl FileView {
     pub fn new(k: &Cfg, font: &FontArc, path: &Path) -> Result<FileView> {
         Ok(Self {
-            file: FileBuffer::open(path, CharLayout::new(font), k.clone())
+            file: FileBuffer::new(path.into(), CharLayout::new(font), k.clone())
                 .with_context(|| anyhow!("failed to open file at \"{}\"", path.display()))?,
             view: ScreenRect {
                 min: vec2(0., 0.),

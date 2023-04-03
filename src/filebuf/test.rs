@@ -14,15 +14,18 @@ struct TestInst {
 
 fn init(fsize: i64, max_mem: usize) -> TestInst {
     let font = FontArc::try_from_vec(fs::read("font.ttf").unwrap()).unwrap();
+    let mut loaded = LoadedData {
+        linemap: LineMap::new(),
+        data: SparseData::new(usize::MAX, 1024, 1024),
+        hot: default(),
+        sel: None,
+        pending_sel_copy: false,
+        warn_time: None,
+    };
+    loaded.linemap.file_size = fsize;
+    loaded.data.file_size = fsize;
     TestInst {
-        loaded: Mutex::new(LoadedData {
-            linemap: LineMap::new(fsize),
-            data: SparseData::new(fsize, usize::MAX, 1024, 1024),
-            hot: default(),
-            sel: None,
-            pending_sel_copy: false,
-            warn_time: None,
-        }),
+        loaded: Mutex::new(loaded),
         linemapper: LineMapper::new(CharLayout::new(&font), fsize, max_mem, 1024),
     }
 }

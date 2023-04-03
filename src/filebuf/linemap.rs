@@ -28,13 +28,14 @@ pub struct LineMap {
     /// TODO: Set an upper limit on the amount of linemap segments before
     /// dropping small/old segments.
     pub(super) segments: Vec<MappedSegment>,
+    /// If set to another value, it should only increase!
     pub(super) file_size: i64,
 }
 impl LineMap {
-    pub fn new(file_size: i64) -> Self {
+    pub fn new() -> Self {
         Self {
             segments: default(),
-            file_size,
+            file_size: 0,
         }
     }
 
@@ -138,6 +139,55 @@ impl LineMap {
     fn offset_to_base(&self, base_offset: i64) -> Option<(&MappedSegment, Anchor)> {
         self.find_segment(base_offset)
             .and_then(|s| s.find_lower(base_offset).map(|a| (s, a)))
+    }
+
+    /// Get the bounding rectangle of the loaded area around a given offset.
+    pub fn bounding_rect(&self, around_offset: i64) -> FileRect {
+        match self.offset_to_base(around_offset) {
+            Some((s, base)) => {
+                // Confine to the limits of loaded data
+                if s.is_x_absolute(base) {
+                    let lo = s.anchors[s.first_absolute];
+                    let hi = s.anchors.back().unwrap();
+                    FileRect {
+                        corner: FilePos {
+                            base_offset: around_offset,
+                            delta_x: -base.x_abs(),
+                            delta_y: (lo.y_offset - base.y_offset) as f64,
+                        },
+                        size: dvec2(s.widest_line, (hi.y_offset - lo.y_offset) as f64),
+                    }
+                } else {
+                    // NOTE: This clamps rendering to the Y of the relative-x line
+                    // Rendering mixed relative and absolute lines in the same screen
+                    // is kind of hard and messy
+                    let lo = s.anchors.front().unwrap();
+                    let hi = s
+                        .anchors
+                        .get(s.first_absolute)
+                        .unwrap_or(s.anchors.back().unwrap());
+                    FileRect {
+                        corner: FilePos {
+                            base_offset: around_offset,
+                            delta_x: lo.x_offset - base.x_offset,
+                            delta_y: 0.,
+                        },
+                        size: dvec2(s.rel_width, (hi.y_offset - lo.y_offset) as f64),
+                    }
+                }
+            }
+            None => {
+                // Cannot scroll if the data is not yet loaded
+                FileRect {
+                    corner: FilePos {
+                        base_offset: around_offset,
+                        delta_x: 0.,
+                        delta_y: 0.,
+                    },
+                    size: DVec2::ZERO,
+                }
+            }
+        }
     }
 }
 impl fmt::Debug for LineMap {
@@ -581,54 +631,6 @@ impl LineMapper {
                 data = &data[(next_l - l) as usize..];
                 l = next_l;
                 i += 1;
-            }
-        }
-    }
-
-    pub fn bounding_rect(&self, lmap: &LineMap, around_offset: i64) -> FileRect {
-        match lmap.offset_to_base(around_offset) {
-            Some((s, base)) => {
-                // Confine to the limits of loaded data
-                if s.is_x_absolute(base) {
-                    let lo = s.anchors[s.first_absolute];
-                    let hi = s.anchors.back().unwrap();
-                    FileRect {
-                        corner: FilePos {
-                            base_offset: around_offset,
-                            delta_x: -base.x_abs(),
-                            delta_y: (lo.y_offset - base.y_offset) as f64,
-                        },
-                        size: dvec2(s.widest_line, (hi.y_offset - lo.y_offset) as f64),
-                    }
-                } else {
-                    // NOTE: This clamps rendering to the Y of the relative-x line
-                    // Rendering mixed relative and absolute lines in the same screen
-                    // is kind of hard and messy
-                    let lo = s.anchors.front().unwrap();
-                    let hi = s
-                        .anchors
-                        .get(s.first_absolute)
-                        .unwrap_or(s.anchors.back().unwrap());
-                    FileRect {
-                        corner: FilePos {
-                            base_offset: around_offset,
-                            delta_x: lo.x_offset - base.x_offset,
-                            delta_y: 0.,
-                        },
-                        size: dvec2(s.rel_width, (hi.y_offset - lo.y_offset) as f64),
-                    }
-                }
-            }
-            None => {
-                // Cannot scroll if the data is not yet loaded
-                FileRect {
-                    corner: FilePos {
-                        base_offset: around_offset,
-                        delta_x: 0.,
-                        delta_y: 0.,
-                    },
-                    size: DVec2::ZERO,
-                }
             }
         }
     }

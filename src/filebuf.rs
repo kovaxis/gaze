@@ -138,26 +138,50 @@ impl Surroundings {
 }
 
 struct Shared {
-    file_size: i64,
+    path: PathBuf,
+    friendly_name: String,
     stop: AtomicCell<bool>,
     sleeping: AtomicCell<bool>,
     loaded: Mutex<LoadedData>,
-    linemapper: LineMapper,
     k: Cfg,
+    layout: CharLayout,
 }
 
 struct FileManager {
     shared: Arc<Shared>,
     file: File,
     read_buf: Vec<u8>,
+    linemapper: LineMapper,
 }
 impl FileManager {
-    fn new(shared: Arc<Shared>, file: File) -> Self {
-        Self {
+    fn new(shared: Arc<Shared>) -> Result<Self> {
+        let mut file = File::open(&shared.path)?;
+        let file_size: i64 = file
+            .seek(io::SeekFrom::End(0))
+            .context("failed to determine length of file")?
+            .try_into()
+            .context("file way too large")?; // can only fail for files larger than 2^63-1
+        let memk = &shared.k.f.linemap_mem;
+        let max_linemap_memory = ((file_size as f64 * memk.fract)
+            .clamp(memk.min_mb * 1024. * 1024., memk.max_mb * 1024. * 1024.)
+            as i64)
+            .clamp(0, isize::MAX as i64) as usize;
+        {
+            let mut loaded = shared.loaded.lock();
+            loaded.linemap.file_size = file_size;
+            loaded.data.file_size = file_size;
+        }
+        Ok(Self {
+            linemapper: LineMapper::new(
+                shared.layout.clone(),
+                file_size,
+                max_linemap_memory,
+                shared.k.f.migrate_batch_size,
+            ),
             read_buf: default(),
             file,
             shared,
-        }
+        })
     }
 
     fn run(mut self) -> Result<()> {
@@ -205,7 +229,7 @@ impl FileManager {
                 out
             };
             // Load segment
-            if r - l >= 4 || self.shared.file_size < 4 {
+            if l < r {
                 if l % (16 * 1024 * 1024) > r % (16 * 1024 * 1024) {
                     eprintln!("loaded {:.2}MB", l as f64 / 1024. / 1024.);
                 }
@@ -237,8 +261,7 @@ impl FileManager {
         (&self.file).read_exact(&mut self.read_buf[..len])?;
 
         let lmap_start = Instant::now();
-        self.shared
-            .linemapper
+        self.linemapper
             .process_data(&self.shared.loaded, offset, &self.read_buf[..len]);
 
         let data_start = Instant::now();
@@ -337,38 +360,24 @@ impl Drop for FileBuffer {
     }
 }
 impl FileBuffer {
-    pub fn open(path: &Path, layout: CharLayout, k: Cfg) -> Result<FileBuffer> {
-        // TODO: Do not do file IO on the main thread
-        // This requires the file size to be set to 0 for a while
-        let mut file = File::open(path)?;
-        let file_size: i64 = file
-            .seek(io::SeekFrom::End(0))
-            .context("failed to determine length of file")?
-            .try_into()
-            .context("file way too large")?; // can only fail for files larger than 2^63-1
-        let memk = &k.f.linemap_mem;
-        let max_linemap_memory = ((file_size as f64 * memk.fract)
-            .clamp(memk.min_mb * 1024. * 1024., memk.max_mb * 1024. * 1024.)
-            as i64)
-            .clamp(0, isize::MAX as i64) as usize;
+    pub fn new(path: PathBuf, layout: CharLayout, k: Cfg) -> Result<FileBuffer> {
         let shared = Arc::new(Shared {
-            file_size,
+            friendly_name: path
+                .file_name()
+                .unwrap_or("?".as_ref())
+                .to_string_lossy()
+                .into_owned(),
+            path,
             stop: false.into(),
             sleeping: false.into(),
-            linemapper: LineMapper::new(
-                layout,
-                file_size,
-                max_linemap_memory,
-                k.f.migrate_batch_size,
-            ),
+            layout,
             loaded: LoadedData {
                 data: SparseData::new(
-                    file_size,
                     (k.f.max_loaded_mb * 1024. * 1024.).ceil() as usize,
                     k.f.merge_batch_size,
                     k.f.realloc_threshold,
                 ),
-                linemap: LineMap::new(file_size),
+                linemap: LineMap::new(),
                 hot: default(),
                 sel: None,
                 pending_sel_copy: false,
@@ -384,7 +393,7 @@ impl FileBuffer {
         let manager = {
             let shared = shared.clone();
             thread::spawn(move || {
-                FileManager::new(shared, file).run()?;
+                FileManager::new(shared)?.run()?;
                 println!("manager thread finishing");
                 Ok(())
             })
@@ -396,12 +405,12 @@ impl FileBuffer {
         FileLock::new(self)
     }
 
-    pub fn _file_size(&self) -> i64 {
-        self.shared.file_size
+    pub fn layout(&self) -> &CharLayout {
+        &self.shared.layout
     }
 
-    pub fn layout(&self) -> &CharLayout {
-        &self.shared.linemapper.layout
+    pub fn friendly_name(&self) -> &str {
+        &self.shared.friendly_name
     }
 }
 
@@ -432,10 +441,7 @@ impl FileLock<'_> {
 
     /// Get the bounding rectangle of the loaded area around a given offset.
     pub fn bounding_rect(&mut self, around_offset: i64) -> FileRect {
-        self.filebuf
-            .shared
-            .linemapper
-            .bounding_rect(&self.loaded.linemap, around_offset)
+        self.loaded.linemap.bounding_rect(around_offset)
     }
 
     /// Look up a file position (by line Y and fractional X coordinate) and map

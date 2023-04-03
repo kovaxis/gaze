@@ -37,6 +37,7 @@ macro_rules! lock_sparse {
 /// Holds sparse segments of data loaded from a potentially huge file.
 pub struct SparseData {
     pub(super) segments: Vec<SparseSegment>,
+    /// If set to another value, it should only increase!
     pub(super) file_size: i64,
     /// Start dropping far away data to keep memory usage under this amount.
     pub(super) max_loaded: usize,
@@ -48,15 +49,10 @@ pub struct SparseData {
     pub(super) realloc_threshold: usize,
 }
 impl SparseData {
-    pub fn new(
-        file_size: i64,
-        max_loaded: usize,
-        merge_batch_size: usize,
-        realloc_threshold: usize,
-    ) -> Self {
+    pub fn new(max_loaded: usize, merge_batch_size: usize, realloc_threshold: usize) -> Self {
         Self {
             segments: default(),
-            file_size,
+            file_size: 0,
             max_loaded,
             merge_batch_size,
             realloc_threshold,

@@ -1,7 +1,7 @@
 use std::mem::ManuallyDrop;
 
 use crate::{cfg::Cfg, prelude::*, ScreenRect, WindowState};
-use ab_glyph::Glyph;
+use ab_glyph::{Font, Glyph};
 use gl::glium::{
     index::{IndicesSource, PrimitiveType},
     uniforms::{MagnifySamplerFilter, MinifySamplerFilter, Uniforms},
@@ -338,16 +338,58 @@ pub fn draw(state: &mut WindowState) -> Result<()> {
             .aux_vbo
             .push_quad(tabs_view, state.k.g.tab_bg_color);
 
-        for (i, _tab) in state.tabs.iter().enumerate() {
+        for (i, tab) in state.tabs.iter().enumerate() {
             let active = i == state.cur_tab;
             let active_idx = (!active) as usize;
+            // Draw tab rect
             let tab_view = WindowState::tab_bounds(&state.k, i, state.tabs.len(), state.screen);
-            // let [top, rt, bot, lt] = state.k.g.tab_padding;
-            // let fonth = state.k.g.tab_height - top - bot;
             state
                 .draw
                 .aux_vbo
                 .push_quad(tab_view, state.k.g.tab_fg_color[active_idx]);
+            // Draw tab title
+            let [top, rt, bot, lt] = state.k.g.tab_padding;
+            let fonth = state.k.g.tab_height - top - bot;
+            let mut replace_with_dots_from = 0;
+            let mut truncate = None;
+            {
+                let mut x = 0.;
+                let extra = tab.file.layout().advance_for('.' as u32) as f32 * fonth * 3.;
+                let limit = tab_view.size().x - lt - rt;
+                for (i, c) in tab.file.friendly_name().chars().enumerate() {
+                    if x + extra <= limit {
+                        replace_with_dots_from = i;
+                    }
+                    x += tab.file.layout().advance_for(c as u32) as f32 * fonth;
+                    if x > limit {
+                        truncate = Some(i);
+                        break;
+                    }
+                }
+            }
+            let mut pos = vec2(tab_view.min.x + lt, tab_view.max.y - bot);
+            for (i, mut c) in tab.file.friendly_name().chars().enumerate() {
+                if let Some(truncate) = truncate {
+                    if i >= truncate {
+                        break;
+                    } else if i >= replace_with_dots_from {
+                        if i - replace_with_dots_from >= 3 {
+                            break;
+                        }
+                        c = '.'
+                    }
+                }
+                state.draw.aux_text.push(
+                    &mut state.draw.glyphs,
+                    state.k.g.tab_text_color[active_idx],
+                    Glyph {
+                        id: state.draw.font.glyph_id(c),
+                        scale: fonth.into(),
+                        position: pos.to_array().into(),
+                    },
+                );
+                pos.x += tab.file.layout().advance_for(c as u32) as f32 * fonth;
+            }
         }
     }
 
