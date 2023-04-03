@@ -114,6 +114,22 @@ impl WindowState {
         }
     }
 
+    fn load_file(&mut self, path: PathBuf) -> Result<()> {
+        let mut tab = Box::new(FileView::new(&self.k, &self.draw.font, &path)?);
+        tab.reposition(Self::fileview_bounds(&self.k, self.screen));
+        let i = (self.cur_tab + 1).min(self.tabs.len());
+        self.tabs.insert(i, tab);
+        self.cur_tab = i;
+        self.redraw();
+        Ok(())
+    }
+
+    fn try_load_file(&mut self, path: PathBuf) {
+        if let Err(err) = self.load_file(path.clone()) {
+            println!("error loading file at \"{}\": {:#}", path.display(), err);
+        }
+    }
+
     fn select_tab(&mut self, i: usize) {
         if i == self.cur_tab {
             return;
@@ -184,6 +200,7 @@ impl WindowState {
                 }
                 WindowEvent::Focused(f) => self.focused = f,
                 WindowEvent::Resized(sz) => self.resize((sz.width, sz.height)),
+                WindowEvent::DroppedFile(path) => self.try_load_file(path),
                 _ => {}
             },
             Event::RedrawRequested(_) => {
@@ -248,13 +265,8 @@ fn main() -> Result<()> {
     let font = FontArc::try_from_vec(fs::read("font.ttf").context("failed to read font file")?)?;
     let k = Cfg::load_or_new();
 
-    let mut tabs = vec![];
-    for path in std::env::args_os().skip(1) {
-        let path = Path::new(&path);
-        tabs.push(Box::new(FileView::new(&k, &font, path)?));
-    }
     let mut state = WindowState {
-        tabs,
+        tabs: vec![],
         cur_tab: 0,
         last_mouse_pos: Vec2::ZERO,
         screen: ScreenRect {
@@ -269,6 +281,10 @@ fn main() -> Result<()> {
     };
 
     state.resize(state.display.get_framebuffer_dimensions());
+
+    for path in std::env::args_os().skip(1) {
+        state.load_file(path.into())?;
+    }
 
     gl_run_loop(
         evloop,

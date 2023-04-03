@@ -390,6 +390,7 @@ impl FileBuffer {
             .into(),
             k,
         });
+        // TOOD: Check and display errors on the frontend
         let manager = {
             let shared = shared.clone();
             thread::spawn(move || {

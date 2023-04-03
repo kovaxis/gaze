@@ -204,8 +204,7 @@ pub struct FileView {
 impl FileView {
     pub fn new(k: &Cfg, font: &FontArc, path: &Path) -> Result<FileView> {
         Ok(Self {
-            file: FileBuffer::new(path.into(), CharLayout::new(font), k.clone())
-                .with_context(|| anyhow!("failed to open file at \"{}\"", path.display()))?,
+            file: FileBuffer::new(path.into(), CharLayout::new(font), k.clone())?,
             view: ScreenRect {
                 min: vec2(0., 0.),
                 max: vec2(1., 1.),
