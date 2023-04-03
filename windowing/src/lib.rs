@@ -1,5 +1,6 @@
 pub use glium;
 pub use glutin;
+pub use native_dialog;
 pub use winit;
 
 pub fn gl_create_display(

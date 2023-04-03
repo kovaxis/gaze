@@ -4,7 +4,7 @@ use drawing::DrawState;
 use fileview::FileView;
 use gl::{
     glutin::event_loop::ControlFlow,
-    winit::event::{ElementState, MouseButton},
+    winit::event::{ElementState, MouseButton, VirtualKeyCode},
     *,
 };
 
@@ -46,6 +46,32 @@ mod drawing;
 mod filebuf;
 mod fileview;
 
+#[derive(Default)]
+pub struct InputState {
+    keys_down: [u64; 4],
+}
+impl InputState {
+    fn key_down(&self, key: VirtualKeyCode) -> bool {
+        let key = key as u32 as u8;
+        (self.keys_down[(key >> 6) as usize] >> (key & 0x3F)) & 1 != 0
+    }
+
+    fn set_key_down(&mut self, key: VirtualKeyCode, down: bool) {
+        let key = key as u32 as u8;
+        let word = &mut self.keys_down[(key >> 6) as usize];
+        let bit = key & 0x3F;
+        *word = *word & !(1 << bit) | ((down as u64) << bit);
+    }
+
+    fn ctrl(&self) -> bool {
+        self.key_down(VirtualKeyCode::LControl) || self.key_down(VirtualKeyCode::RControl)
+    }
+
+    fn shift(&self) -> bool {
+        self.key_down(VirtualKeyCode::LShift) || self.key_down(VirtualKeyCode::RShift)
+    }
+}
+
 pub struct WindowState {
     display: Display,
     draw: DrawState,
@@ -54,7 +80,7 @@ pub struct WindowState {
     k: Cfg,
     last_mouse_pos: Vec2,
     screen: ScreenRect,
-    ctrl_down: bool,
+    keys: InputState,
     focused: bool,
 }
 impl WindowState {
@@ -180,9 +206,38 @@ impl WindowState {
                     use glutin::event::VirtualKeyCode::*;
                     let down = elem2bool(input.state);
                     match input.virtual_keycode {
-                        Some(Escape) => *flow = ControlFlow::Exit,
-                        Some(LControl) => self.ctrl_down = down,
+                        Some(W) if down && self.keys.ctrl() => {
+                            self.kill_tab(self.cur_tab);
+                        }
+                        Some(O) if down && self.keys.ctrl() => {
+                            let paths = gl::native_dialog::FileDialog::new()
+                                .set_owner(self.display.gl_window().window())
+                                .show_open_multiple_file();
+                            match paths {
+                                Ok(paths) => {
+                                    for path in paths {
+                                        self.try_load_file(path);
+                                    }
+                                }
+                                Err(err) => println!("failed to pick file: {:#}", err),
+                            }
+                        }
+                        Some(Tab) if down && self.keys.ctrl() => {
+                            if !self.tabs.is_empty() {
+                                let mut i = self.cur_tab;
+                                if self.keys.shift() {
+                                    i += self.tabs.len() - 1;
+                                } else {
+                                    i += 1;
+                                }
+                                i %= self.tabs.len();
+                                self.select_tab(i);
+                            }
+                        }
                         _ => {}
+                    }
+                    if let Some(key) = input.virtual_keycode {
+                        self.keys.set_key_down(key, down);
                     }
                 }
                 WindowEvent::MouseInput {
@@ -273,7 +328,7 @@ fn main() -> Result<()> {
             min: vec2(0., 0.),
             max: vec2(1., 1.),
         },
-        ctrl_down: false,
+        keys: default(),
         focused: false,
         draw: DrawState::new(&display, &font, &k)?,
         display,

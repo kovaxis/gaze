@@ -433,7 +433,7 @@ impl FileView {
                     use gl::glutin::event::VirtualKeyCode::*;
                     let down = elem2bool(input.state);
                     match input.virtual_keycode {
-                        Some(C) if down && state.ctrl_down => {
+                        Some(C) if down && state.keys.ctrl() => {
                             self.send_sel_copy.set(true);
                             state.redraw();
                         }
