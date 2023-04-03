@@ -23,7 +23,7 @@ fn init(fsize: i64, max_mem: usize) -> TestInst {
             pending_sel_copy: false,
             warn_time: None,
         }),
-        linemapper: LineMapper::new(font, fsize, max_mem, 1024),
+        linemapper: LineMapper::new(&font, fsize, max_mem, 1024),
     }
 }
 

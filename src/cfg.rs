@@ -192,13 +192,6 @@ impl Default for Cfg {
     }
 }
 impl Cfg {
-    pub fn file_view_bounds(&self, (w, h): (u32, u32)) -> (Vec2, Vec2) {
-        (
-            vec2(self.g.left_bar, 0.),
-            vec2(w as f32 - self.g.left_bar, h as f32),
-        )
-    }
-
     pub fn near_exe() -> Option<PathBuf> {
         let mut near_exe = std::env::current_exe().ok()?;
         near_exe.pop();

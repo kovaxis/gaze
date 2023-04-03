@@ -185,7 +185,7 @@ impl LineMapper {
     pub const NEWLINE: u32 = '\n' as u32;
 
     pub fn new(
-        font: FontArc,
+        font: &FontArc,
         file_size: i64,
         max_memory: usize,
         migrate_batch_size: usize,

@@ -349,14 +349,10 @@ impl SparseData {
             }
             // Report shrinkage
             println!(
-                "memory usage was at {:.3}/{:.3}MB, so {:.3}MB were freed",
+                "memory usage was at {:.3}/{:.3}MB, so {:.3}MB were freed, leaving these segments only:",
                 total_cap as f64 / 1024. / 1024.,
                 sparse.max_loaded as f64 / 1024. / 1024.,
                 shrinked_by as f64 / 1024. / 1024.,
-            );
-            println!(
-                "the range at [{}, {}) was kept, leaving these segments:",
-                keep.start, keep.end
             );
             for s in sparse.segments.iter() {
                 println!("  [{}, {})", s.offset, s.offset + s.data.len() as i64);

@@ -311,7 +311,7 @@ impl Drop for FileBuffer {
     }
 }
 impl FileBuffer {
-    pub fn open(path: &Path, font: FontArc, k: Cfg) -> Result<FileBuffer> {
+    pub fn open(path: &Path, font: &FontArc, k: Cfg) -> Result<FileBuffer> {
         // TODO: Do not do file IO on the main thread
         // This requires the file size to be set to 0 for a while
         let mut file = File::open(path)?;
