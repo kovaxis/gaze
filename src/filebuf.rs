@@ -414,7 +414,12 @@ impl FileLock<'_> {
 
     /// Look up a file position (by line Y and fractional X coordinate) and map
     /// it to the last offset that is before or at the given position.
-    pub fn lookup_pos(&self, base_offset: i64, y: i64, x: f64) -> Option<DataAt> {
+    ///
+    /// `hdiv` specifies how to round fractional X positions to exact character boundaries.
+    /// `hdiv = 1` rounds like `floor`, to the last boundary before `x`
+    /// `hdiv = 0.5` rounds like `round`, to the closest boundary to `x`
+    /// `hdiv = 0` rounds like `ceil`, to the first boundary after `x`
+    pub fn lookup_pos(&self, base_offset: i64, y: i64, x: f64, hdiv: f64) -> Option<DataAt> {
         let loaded = &*self.loaded;
         let (base, lo) = loaded.linemap.pos_to_anchor(base_offset, y, x)?;
         let mut offset = lo.offset;
@@ -435,7 +440,7 @@ impl FileLock<'_> {
                 }
                 c => {
                     let hadv = self.filebuf.advance_for(c);
-                    if dy == y && dx + hadv > x {
+                    if dy == y && dx + hadv * hdiv > x {
                         break;
                     }
                     dx += hadv;
@@ -464,7 +469,7 @@ impl FileLock<'_> {
         let x1 = view.corner.delta_x + view.size.x;
         for y in y0..y1 {
             // Look up the start of this line
-            let mut data = match self.lookup_pos(view.corner.base_offset, y, x0) {
+            let mut data = match self.lookup_pos(view.corner.base_offset, y, x0, 1.) {
                 Some(d) => d,
                 None => continue,
             };

@@ -224,9 +224,9 @@ impl FileView {
     /// The range might not be resolvable if the relevant offsets have been unloaded.
     fn selected_range(&self, file: &FileLock) -> Option<ops::Range<i64>> {
         let (fo, fy, fx) = self.selected.first.floor();
-        let mut first = file.lookup_pos(fo, fy, fx)?;
+        let mut first = file.lookup_pos(fo, fy, fx, 0.5)?;
         let (so, sy, sx) = self.selected.second.floor();
-        let mut second = file.lookup_pos(so, sy, sx)?;
+        let mut second = file.lookup_pos(so, sy, sx, 0.5)?;
         if second.offset < first.offset {
             mem::swap(&mut first, &mut second);
         }
