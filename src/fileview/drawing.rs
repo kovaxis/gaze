@@ -12,16 +12,17 @@ use crate::{
     ScreenRect, WindowState,
 };
 
-use super::Drag;
+use super::{Drag, FileTab};
 
 pub fn draw_withtext(
     state: &mut WindowState,
-    fview: &mut FileView,
+    ftab: &mut FileTab,
     ctx: &mut FrameCtx,
 ) -> Result<()> {
     // Lock the shared file data
     // We want to do this only once, to minimize latency
-    let mut file = fview.file.lock();
+    let mut file = ftab.file.lock();
+    let fview = &mut ftab.view;
 
     let text_view = FileView::text_view(&state.k, fview.view);
 
@@ -40,11 +41,16 @@ pub fn draw_withtext(
         fview.scroll.last_bounds = scroll_bounds;
     }
 
-    // Transform the selected area from position to absolute offsets
-    let selection = fview.selected_range(&file);
-    let sel_offsets = selection
-        .as_ref()
-        .map(|(f, s)| f.offset.min(s.offset)..f.offset.max(s.offset));
+    // Do any bookkeeping that requires the lock
+    // This includes moving the selection
+    fview.bookkeep_file(state, &mut file);
+
+    // Get the selection range
+    let sel_range = if fview.selected.first <= fview.selected.second {
+        fview.selected.first..fview.selected.second
+    } else {
+        fview.selected.second..fview.selected.first
+    };
 
     // Iterate over all characters on the screen and queue them up for rendering
     let mut linenum_buf = String::new();
@@ -64,7 +70,7 @@ pub fn draw_withtext(
                 let y = text_view.min.y
                     + ((dy + 1) as f64 - fview.scroll.pos.delta_y) as f32 * state.k.g.font_height;
                 for c in linenum_buf.bytes().rev() {
-                    x -= fview.file.layout().advance_for(c as u32) as f32 * state.k.g.font_height;
+                    x -= ftab.file.layout().advance_for(c as u32) as f32 * state.k.g.font_height;
                     state.draw.linenums.push(
                         &mut state.draw.glyphs,
                         state.k.g.linenum_color,
@@ -101,10 +107,7 @@ pub fn draw_withtext(
                     .as_vec2()
                         * state.k.g.font_height;
                 // If the character is selected, make sure the selection box wraps it
-                let is_sel = sel_offsets
-                    .as_ref()
-                    .map(|r| r.start <= offset && offset < r.end)
-                    .unwrap_or(false);
+                let is_sel = sel_range.start <= offset && offset < sel_range.end;
                 if is_sel {
                     sel_box.min.x = sel_box.min.x.min(pos.x);
                     sel_box.max.x = sel_box
@@ -140,14 +143,14 @@ pub fn draw_withtext(
     }
 
     // Draw cursor
-    if let Some((_f, s)) = selection {
+    if let Some(pos) = fview.selected.last_positions[1] {
         let (visible, next) = fview.selected.check_blink(&state.k);
         ctx.schedule_redraw(next);
-        if visible {
+        if visible && pos.base_offset == fview.scroll.pos.base_offset {
             let pos = text_view.min
                 + dvec2(
-                    s.dx - fview.scroll.pos.delta_x,
-                    s.dy as f64 - fview.scroll.pos.delta_y + state.k.g.selection_offset as f64,
+                    pos.delta_x - fview.scroll.pos.delta_x,
+                    pos.delta_y - fview.scroll.pos.delta_y + state.k.g.selection_offset as f64,
                 )
                 .as_vec2()
                     * state.k.g.font_height;
@@ -169,17 +172,11 @@ pub fn draw_withtext(
         state.redraw();
     }
 
-    // Do any bookkeeping that requires the lock
-    fview.bookkeep_file(state, &mut file, sel_offsets);
-
     Ok(())
 }
 
-pub fn draw_notext(
-    state: &mut WindowState,
-    fview: &mut FileView,
-    ctx: &mut FrameCtx,
-) -> Result<()> {
+pub fn draw_notext(state: &mut WindowState, ftab: &mut FileTab, ctx: &mut FrameCtx) -> Result<()> {
+    let fview = &mut ftab.view;
     let file_view_scissor = fview.view.as_gl_rect(ctx.size);
     let text_view_scissor = FileView::text_view(&state.k, fview.view).as_gl_rect(ctx.size);
 

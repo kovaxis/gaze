@@ -332,9 +332,9 @@ pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
     state.draw.aux_text.clear();
 
     // Draw file text, and anything else that requires locking the shared file block
-    if let Some(mut fview) = state.take_fview(state.cur_tab) {
-        crate::fileview::drawing::draw_withtext(state, &mut fview, &mut ctx)?;
-        state.put_fview(state.cur_tab, fview);
+    if let Some(mut ftab) = state.take_ftab(state.cur_tab) {
+        crate::fileview::drawing::draw_withtext(state, &mut ftab, &mut ctx)?;
+        state.put_ftab(state.cur_tab, ftab);
     }
 
     // Draw the tab list
@@ -440,9 +440,9 @@ pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
         .upload_verts(&mut state.draw.glyphs, &state.display)?;
 
     // Draw non-text file view components
-    if let Some(mut fview) = state.take_fview(state.cur_tab) {
-        crate::fileview::drawing::draw_notext(state, &mut fview, &mut ctx)?;
-        state.put_fview(state.cur_tab, fview);
+    if let Some(mut ftab) = state.take_ftab(state.cur_tab) {
+        crate::fileview::drawing::draw_notext(state, &mut ftab, &mut ctx)?;
+        state.put_ftab(state.cur_tab, ftab);
     }
 
     // Draw the auxiliary decorations

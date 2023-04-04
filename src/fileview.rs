@@ -5,7 +5,7 @@ use gl::winit::event::MouseScrollDelta;
 use crate::{
     cfg::Cfg,
     elem2bool,
-    filebuf::{CharLayout, DataAt, FileLock, FilePos, FileRect},
+    filebuf::{CharLayout, FileLock, FilePos, FileRect},
     mouse2id,
     prelude::*,
     ScreenRect, WindowState,
@@ -133,18 +133,17 @@ impl ScrollManager {
 }
 
 pub struct Selected {
-    /// The first selected position.
-    pub first: FilePos,
-    /// The second selected position.
+    /// The first selected offset.
+    pub first: i64,
+    /// The second selected offset.
     /// Note that this position might be before the first position,
     /// the "second" is chronological, not physical.
-    pub second: FilePos,
-    /// Whether the second position has been set down or if it is
-    /// still in flux.
-    pub second_set: bool,
+    pub second: i64,
     /// The last modification time of the selection.
     /// Used for cursor blink.
     pub mod_time: Instant,
+    /// Non-authoritative physical position of the selection endpoints.
+    pub last_positions: [Option<FilePos>; 2],
 }
 impl Selected {
     /// Mark the selection as modified.
@@ -213,18 +212,52 @@ impl Drag {
     }
 }
 
-pub struct FileView {
+enum MoveKind {
+    /// Move directly to the character boundary closest to the
+    /// given file position.
+    Absolute(FilePos),
+    /// Move a number of characters to the left/right.
+    CharDelta(i16),
+    /// Move a number of lines up/down.
+    LineDelta(i64),
+}
+
+/// Cursor movement commands.
+/// When the key is typed, these commands are queued so that they can all
+/// be executed at the same time reusing the same file lock.
+struct MoveCmd {
+    /// Whether to reset the selection range.
+    /// Otherwise, only move the second selection edge.
+    reset: bool,
+    /// The different kinds of movement.
+    kind: MoveKind,
+}
+
+pub struct FileTab {
     pub file: FileBuffer,
+    pub view: FileView,
+}
+impl FileTab {
+    pub fn new(k: &Cfg, font: &FontArc, path: &Path) -> Result<FileTab> {
+        Ok(Self {
+            file: FileBuffer::new(path.into(), CharLayout::new(font), k.clone())?,
+            view: FileView::new(),
+        })
+    }
+}
+
+pub struct FileView {
     view: ScreenRect,
     send_sel_copy: Cell<bool>,
     scroll: ScrollManager,
     selected: Selected,
+    move_queue: Vec<MoveCmd>,
     drag: Drag,
+    selecting: bool,
 }
 impl FileView {
-    pub fn new(k: &Cfg, font: &FontArc, path: &Path) -> Result<FileView> {
-        Ok(Self {
-            file: FileBuffer::new(path.into(), CharLayout::new(font), k.clone())?,
+    pub fn new() -> FileView {
+        Self {
             view: ScreenRect {
                 min: vec2(0., 0.),
                 max: vec2(1., 1.),
@@ -234,21 +267,18 @@ impl FileView {
             selected: Selected {
                 first: default(),
                 second: default(),
-                second_set: true,
                 mod_time: Instant::now(),
+                last_positions: [Some(default()); 2],
             },
+            selecting: false,
+            move_queue: vec![],
             send_sel_copy: false.into(),
-        })
+        }
     }
 
-    /// Get the selected range as absolute offsets.
-    /// The range might not be resolvable if the relevant offsets have been unloaded.
-    fn selected_range<'a>(&self, file: &'a FileLock) -> Option<(DataAt<'a>, DataAt<'a>)> {
-        let (fo, fy, fx) = self.selected.first.floor();
-        let first = file.lookup_pos(fo, fy, fx, 0.5)?;
-        let (so, sy, sx) = self.selected.second.floor();
-        let second = file.lookup_pos(so, sy, sx, 0.5)?;
-        Some((first, second))
+    fn move_selection(&mut self, cmd: MoveCmd) {
+        self.move_queue.push(cmd);
+        self.selected.touch();
     }
 
     fn text_view(k: &Cfg, view: ScreenRect) -> ScreenRect {
@@ -319,23 +349,22 @@ impl FileView {
                     let pos =
                         self.scroll
                             .screen_to_file_pos(&state.k, self.view, state.last_mouse_pos);
-                    self.selected = Selected {
-                        first: pos,
-                        second: pos,
-                        second_set: false,
-                        mod_time: Instant::now(),
-                    };
+                    self.move_selection(MoveCmd {
+                        reset: true,
+                        kind: MoveKind::Absolute(pos),
+                    });
+                    self.selecting = true;
                     state.redraw();
                     return;
                 }
             } else {
                 // Stop selecting text
-                self.selected.second_set = true;
+                self.selecting = false;
             }
         }
     }
 
-    fn tick_drag(&mut self, state: &mut WindowState, pos: Vec2) {
+    fn tick_drag(&mut self, state: &mut WindowState, pos: Vec2, synthetic: bool) {
         // Tick any form of scrolling
         match &self.drag {
             Drag::None => {}
@@ -404,15 +433,15 @@ impl FileView {
             }
         }
         // Tick selection moves
-        if !self.selected.second_set {
+        if self.selecting && !synthetic {
             let newpos = self
                 .scroll
                 .screen_to_file_pos(&state.k, self.view, state.last_mouse_pos);
-            if newpos != self.selected.second {
-                self.selected.second = newpos;
-                self.selected.touch();
-                state.redraw();
-            }
+            self.move_selection(MoveCmd {
+                reset: false,
+                kind: MoveKind::Absolute(newpos),
+            });
+            state.redraw();
         }
     }
 
@@ -423,7 +452,7 @@ impl FileView {
     /// Call this to notify the file view that the user switched to another tab.
     pub fn unfocus(&mut self) {
         self.drag = Drag::None;
-        self.selected.second_set = true;
+        self.selecting = false;
     }
 
     /// Ran periodically.
@@ -433,14 +462,66 @@ impl FileView {
     /// the file twice per frame, and that is very suboptimal.
     /// The file manager might take single-digit amount of milliseconds to
     /// release the lock, so we *really* don't want to incur this cost twice.
-    fn bookkeep_file(
-        &self,
-        _state: &mut WindowState,
-        file: &mut FileLock,
-        selected: Option<ops::Range<i64>>,
-    ) {
+    fn bookkeep_file(&mut self, _state: &mut WindowState, file: &mut FileLock) {
+        // Apply selection movements
+        for cmd in self.move_queue.drain(..) {
+            match cmd.kind {
+                MoveKind::Absolute(pos) => {
+                    let (base, y, x) = pos.floor();
+                    if let Some(at) = file.lookup_pos(base, y, x, 0.5) {
+                        self.selected.second = at.offset;
+                        self.selected.last_positions[1] = Some(FilePos {
+                            base_offset: base,
+                            delta_y: at.dy as f64,
+                            delta_x: at.dx,
+                        });
+                    }
+                }
+                MoveKind::CharDelta(delta) => {
+                    // TODO: This may leave the cursor in the middle of a UTF-8 character
+                    // if we are at the edge of loaded data
+                    // Figure out what to do about it
+                    let off = file
+                        .char_delta(self.selected.second, delta)
+                        .unwrap_or_else(|e| e);
+                    self.selected.second = off;
+                    self.selected.last_positions[1] = file
+                        .lookup_offset(self.scroll.pos.base_offset, off)
+                        .map(|at| FilePos {
+                            base_offset: self.scroll.pos.base_offset,
+                            delta_x: at.dx,
+                            delta_y: at.dy as f64,
+                        });
+                }
+                MoveKind::LineDelta(delta) => {
+                    if let Some(at) = file.lookup_offset(self.selected.second, self.selected.second)
+                    {
+                        if let Some(at_target) =
+                            file.lookup_pos(self.selected.second, at.dy + delta, at.dx, 0.5)
+                        {
+                            self.selected.second = at_target.offset;
+                            self.selected.last_positions[1] = file
+                                .lookup_offset(self.scroll.pos.base_offset, self.selected.second)
+                                .map(|at| FilePos {
+                                    base_offset: self.scroll.pos.base_offset,
+                                    delta_x: at.dx,
+                                    delta_y: at.dy as f64,
+                                });
+                        }
+                    }
+                }
+            }
+            if cmd.reset {
+                self.selected.first = self.selected.second;
+                self.selected.last_positions[0] = self.selected.last_positions[1];
+            }
+        }
         // Inform the backend about what area of the file to load (and keep loaded)
-        file.set_hot_area(self.scroll.last_view, selected);
+        let mut selection = self.selected.first..self.selected.second;
+        if selection.start > selection.end {
+            mem::swap(&mut selection.start, &mut selection.end);
+        }
+        file.set_hot_area(self.scroll.last_view, Some(selection));
         // Send a copy command if requested
         if self.send_sel_copy.get() {
             file.copy_selection();
@@ -458,6 +539,34 @@ impl FileView {
                     match input.virtual_keycode {
                         Some(C) if down && state.keys.ctrl() => {
                             self.send_sel_copy.set(true);
+                            state.redraw();
+                        }
+                        Some(Left) if down => {
+                            self.move_selection(MoveCmd {
+                                reset: !state.keys.shift(),
+                                kind: MoveKind::CharDelta(-1),
+                            });
+                            state.redraw();
+                        }
+                        Some(Right) if down => {
+                            self.move_selection(MoveCmd {
+                                reset: !state.keys.shift(),
+                                kind: MoveKind::CharDelta(1),
+                            });
+                            state.redraw();
+                        }
+                        Some(Up) if down => {
+                            self.move_selection(MoveCmd {
+                                reset: !state.keys.shift(),
+                                kind: MoveKind::LineDelta(-1),
+                            });
+                            state.redraw();
+                        }
+                        Some(Down) if down => {
+                            self.move_selection(MoveCmd {
+                                reset: !state.keys.shift(),
+                                kind: MoveKind::LineDelta(1),
+                            });
                             state.redraw();
                         }
                         _ => {}
@@ -491,7 +600,7 @@ impl FileView {
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let pos = dvec2(position.x, position.y).as_vec2();
-                    self.tick_drag(state, pos);
+                    self.tick_drag(state, pos, false);
                     {
                         use gl::winit::window::CursorIcon;
                         let icon = if self.view.is_inside(pos)
@@ -514,7 +623,7 @@ impl FileView {
                 _ => {}
             },
             Event::RedrawRequested(_) => {
-                self.tick_drag(state, state.last_mouse_pos);
+                self.tick_drag(state, state.last_mouse_pos, true);
             }
             _ => {}
         }

@@ -1,7 +1,7 @@
 use crate::prelude::*;
 use cfg::Cfg;
 use drawing::DrawState;
-use fileview::FileView;
+use fileview::FileTab;
 use gl::{
     glutin::event_loop::ControlFlow,
     winit::event::{ElementState, MouseButton, StartCause, VirtualKeyCode},
@@ -49,13 +49,9 @@ mod fileview;
 #[derive(Default)]
 pub struct InputState {
     keys_down: [u64; 4],
+    mouse_down: u64,
 }
 impl InputState {
-    fn key_down(&self, key: VirtualKeyCode) -> bool {
-        let key = key as u32 as u8;
-        (self.keys_down[(key >> 6) as usize] >> (key & 0x3F)) & 1 != 0
-    }
-
     fn set_key_down(&mut self, key: VirtualKeyCode, down: bool) {
         let key = key as u32 as u8;
         let word = &mut self.keys_down[(key >> 6) as usize];
@@ -63,12 +59,31 @@ impl InputState {
         *word = *word & !(1 << bit) | ((down as u64) << bit);
     }
 
+    fn set_mouse_down(&mut self, btn: u16, down: bool) {
+        if btn < 64 {
+            self.mouse_down = self.mouse_down & !(1 << btn) | ((down as u64) << btn);
+        }
+    }
+
+    fn key(&self, key: VirtualKeyCode) -> bool {
+        let key = key as u32 as u8;
+        (self.keys_down[(key >> 6) as usize] >> (key & 0x3F)) & 1 != 0
+    }
+
+    fn mouse(&self, btn: u16) -> bool {
+        if btn >= 64 {
+            false
+        } else {
+            (self.mouse_down >> btn) & 1 != 0
+        }
+    }
+
     fn ctrl(&self) -> bool {
-        self.key_down(VirtualKeyCode::LControl) || self.key_down(VirtualKeyCode::RControl)
+        self.key(VirtualKeyCode::LControl) || self.key(VirtualKeyCode::RControl)
     }
 
     fn shift(&self) -> bool {
-        self.key_down(VirtualKeyCode::LShift) || self.key_down(VirtualKeyCode::RShift)
+        self.key(VirtualKeyCode::LShift) || self.key(VirtualKeyCode::RShift)
     }
 }
 
@@ -76,7 +91,7 @@ pub struct WindowState {
     display: Display,
     draw: DrawState,
     cur_tab: usize,
-    tabs: Vec<Box<FileView>>,
+    tabs: Vec<Box<FileTab>>,
     k: Cfg,
     last_mouse_pos: Vec2,
     screen: ScreenRect,
@@ -113,7 +128,7 @@ impl WindowState {
         }
     }
 
-    fn take_fview(&mut self, idx: usize) -> Option<Box<FileView>> {
+    fn take_ftab(&mut self, idx: usize) -> Option<Box<FileTab>> {
         if idx < self.tabs.len() {
             Some(self.tabs.swap_remove(idx))
         } else {
@@ -121,9 +136,9 @@ impl WindowState {
         }
     }
 
-    fn put_fview(&mut self, idx: usize, fview: Box<FileView>) {
+    fn put_ftab(&mut self, idx: usize, ftab: Box<FileTab>) {
         let last = self.tabs.len();
-        self.tabs.push(fview);
+        self.tabs.push(ftab);
         self.tabs.swap(idx, last);
     }
 
@@ -134,15 +149,16 @@ impl WindowState {
         };
         let bounds = Self::fileview_bounds(&self.k, self.screen);
         for i in 0..self.tabs.len() {
-            let mut fview = self.take_fview(i).unwrap();
-            fview.reposition(bounds);
-            self.put_fview(i, fview);
+            let mut ftab = self.take_ftab(i).unwrap();
+            ftab.view.reposition(bounds);
+            self.put_ftab(i, ftab);
         }
     }
 
     fn load_file(&mut self, path: PathBuf) -> Result<()> {
-        let mut tab = Box::new(FileView::new(&self.k, &self.draw.font, &path)?);
-        tab.reposition(Self::fileview_bounds(&self.k, self.screen));
+        let mut tab = Box::new(FileTab::new(&self.k, &self.draw.font, &path)?);
+        tab.view
+            .reposition(Self::fileview_bounds(&self.k, self.screen));
         let i = (self.cur_tab + 1).min(self.tabs.len());
         self.tabs.insert(i, tab);
         self.cur_tab = i;
@@ -161,7 +177,7 @@ impl WindowState {
             return;
         }
         if let Some(tab) = self.tabs.get_mut(self.cur_tab) {
-            tab.unfocus();
+            tab.view.unfocus();
         }
         self.cur_tab = i;
         self.redraw();
@@ -193,11 +209,10 @@ impl WindowState {
 
     fn handle_event(&mut self, ev: gl::winit::event::Event<()>, flow: &mut ControlFlow) {
         use gl::winit::event::{Event, WindowEvent};
-        //eprintln!("event: {:?}, flow: {:?}", ev, flow);
         // Dispatch event to active file view
-        if let Some(mut fview) = self.take_fview(self.cur_tab) {
-            fview.handle_event(self, &ev);
-            self.put_fview(self.cur_tab, fview);
+        if let Some(mut ftab) = self.take_ftab(self.cur_tab) {
+            ftab.view.handle_event(self, &ev);
+            self.put_ftab(self.cur_tab, ftab);
         }
         // Handle event at the window level
         match ev {
@@ -250,6 +265,7 @@ impl WindowState {
                     if tabs_bounds.is_inside(self.last_mouse_pos) {
                         self.handle_tab_click(button, down);
                     }
+                    self.keys.set_mouse_down(button, down);
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     self.last_mouse_pos = dvec2(position.x, position.y).as_vec2();

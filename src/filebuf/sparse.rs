@@ -357,10 +357,20 @@ impl SparseData {
     }
 
     /// Find the longest contiguous segment of data starting at `at`.
-    pub fn longest_contiguous(&self, at: i64) -> &[u8] {
+    pub fn longest_prefix(&self, starting_at: i64) -> &[u8] {
         for s in self.segments.iter().rev() {
-            if s.offset <= at {
-                return &s.data[(at - s.offset).min(s.data.len() as i64) as usize..];
+            if s.offset <= starting_at {
+                return &s.data[(starting_at - s.offset).min(s.data.len() as i64) as usize..];
+            }
+        }
+        &[][..]
+    }
+
+    /// Find the longest contiguous segment of data ending at `at`.
+    pub fn longest_suffix(&self, ending_at: i64) -> &[u8] {
+        for s in self.segments.iter() {
+            if s.offset + s.data.len() as i64 >= ending_at {
+                return &s.data[..(ending_at - s.offset).max(0) as usize];
             }
         }
         &[][..]

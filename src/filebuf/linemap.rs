@@ -136,6 +136,22 @@ impl LineMap {
         Some((base, s.locate_upper(y, x)))
     }
 
+    /// If the two offsets are comparable (that is, they reside in the same segment
+    /// and are both x-absolute or x-relative), return anchors for both offsets.
+    pub fn offset_to_anchor(&self, base_offset: i64, offset: i64) -> Option<(Anchor, Anchor)> {
+        let (s1, base) = self.offset_to_base(base_offset)?;
+        let (s2, lo) = self.offset_to_base(offset)?;
+        if s1 as *const MappedSegment != s2 as *const MappedSegment {
+            // The offsets do not reside in the same segment
+            return None;
+        }
+        if s1.is_x_absolute(base) != s1.is_x_absolute(lo) {
+            // The offsets are in different absoluteness contexts
+            return None;
+        }
+        Some((base, lo))
+    }
+
     fn offset_to_base(&self, base_offset: i64) -> Option<(&MappedSegment, Anchor)> {
         self.find_segment(base_offset)
             .and_then(|s| s.find_lower(base_offset).map(|a| (s, a)))
@@ -770,49 +786,83 @@ pub fn decode_utf8(b: &[u8]) -> (Result<u32, u8>, usize) {
     assert!(!b.is_empty());
     if b[0] & 0b1000_0000 == 0 {
         // Single byte
-        (Ok(b[0] as u32), 1)
+        return (Ok(b[0] as u32), 1);
     } else if b[0] & 0b0100_0000 == 0 {
         // Continuation byte
-        (Err(b[0]), 1)
     } else if b[0] & 0b0010_0000 == 0 {
         // Two bytes
-        if b.len() < 2 || !is_utf8_cont(b[1]) {
-            (Err(b[0]), 1)
-        } else {
-            (
+        if b.len() >= 2 && is_utf8_cont(b[1]) {
+            return (
                 Ok((b[0] as u32 & 0b0001_1111) << 6 | (b[1] as u32 & 0b0011_1111)),
                 2,
-            )
+            );
         }
     } else if b[0] & 0b0001_0000 == 0 {
         // Three bytes
-        if b.len() < 3 || !is_utf8_cont(b[1]) || !is_utf8_cont(b[2]) {
-            (Err(b[0]), 1)
-        } else {
-            (
+        if b.len() >= 3 && is_utf8_cont(b[1]) && is_utf8_cont(b[2]) {
+            return (
                 Ok((b[0] as u32 & 0b1111) << 12
                     | (b[1] as u32 & 0b0011_1111) << 6
                     | (b[2] as u32 & 0b0011_1111)),
                 3,
-            )
+            );
         }
     } else if b[0] & 0b0000_1000 == 0 {
         // Four bytes
-        if b.len() < 4 || !is_utf8_cont(b[1]) || !is_utf8_cont(b[2]) || !is_utf8_cont(b[3]) {
-            (Err(b[0]), 1)
-        } else {
-            (
+        if b.len() >= 4 && is_utf8_cont(b[1]) && is_utf8_cont(b[2]) && is_utf8_cont(b[3]) {
+            return (
                 Ok((b[0] as u32 & 0b0111) << 18
                     | (b[1] as u32 & 0b0011_1111) << 12
                     | (b[2] as u32 & 0b0011_1111) << 6
                     | (b[3] as u32 & 0b0011_1111)),
                 4,
-            )
+            );
         }
-    } else {
-        // Invalid header byte
-        (Err(b[0]), 1)
     }
+    // Invalid UTF-8 character, fall back to reading a single byte
+    (Err(b[0]), 1)
+}
+
+/// Similar to `decode_utf8` but in reverse.
+/// Reads a single character from the end of the given slice.
+pub fn decode_utf8_rev(b: &[u8]) -> (Result<u32, u8>, usize) {
+    assert!(!b.is_empty());
+    let n = b.len();
+    if b[n - 1] & 0b1000_0000 == 0 {
+        // Single byte
+        return (Ok(b[n - 1] as u32), 1);
+    } else if is_utf8_cont(b[n - 1]) && n >= 2 {
+        // At least 2-byte
+        if b[n - 2] & 0b1110_0000 == 0b1100_0000 {
+            // Two bytes
+            return (
+                Ok((b[n - 2] as u32 & 0b0001_1111) << 6 | (b[n - 1] as u32 & 0b0011_1111)),
+                2,
+            );
+        } else if is_utf8_cont(b[n - 2]) && n >= 3 {
+            // At least 3-byte
+            if b[n - 3] & 0b1111_0000 == 0b1110_0000 {
+                // Three bytes
+                return (
+                    Ok((b[n - 3] as u32 & 0b1111) << 12
+                        | (b[n - 2] as u32 & 0b0011_1111) << 6
+                        | (b[n - 1] as u32 & 0b0011_1111)),
+                    3,
+                );
+            } else if is_utf8_cont(b[n - 3]) && n >= 4 && b[n - 4] & 0b1111_1000 == 0b1111_0000 {
+                // Four bytes
+                return (
+                    Ok((b[n - 4] as u32 & 0b0111) << 18
+                        | (b[n - 3] as u32 & 0b0011_1111) << 12
+                        | (b[n - 2] as u32 & 0b0011_1111) << 6
+                        | (b[n - 1] as u32 & 0b0011_1111)),
+                    4,
+                );
+            }
+        }
+    }
+    // Invalid UTF-8, fall back to reading 1 byte
+    (Err(b[n - 1]), 1)
 }
 
 #[derive(Clone, Copy, Debug)]

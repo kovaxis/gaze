@@ -7,7 +7,7 @@ use crate::{
     prelude::*,
 };
 
-use self::linemap::LineMapper;
+use self::linemap::{decode_utf8_rev, LineMapper};
 
 mod linemap;
 mod sparse;
@@ -193,7 +193,7 @@ impl FileManager {
 
                 // Process clipboard copy operations
                 if let (true, Some(sel)) = (loaded.pending_sel_copy, loaded.sel.as_ref()) {
-                    let data = loaded.data.longest_contiguous(sel.start);
+                    let data = loaded.data.longest_prefix(sel.start);
                     if data.len() as i64 >= sel.end - sel.start {
                         let data = &data[..(sel.end - sel.start) as usize];
                         match set_clipboard(data) {
@@ -456,7 +456,7 @@ impl FileLock<'_> {
         let loaded = &*self.loaded;
         let (base, lo) = loaded.linemap.pos_to_anchor(base_offset, y, x)?;
         let mut offset = lo.offset;
-        let mut data = loaded.data.longest_contiguous(offset);
+        let mut data = loaded.data.longest_prefix(offset);
         // NOTE: This subtraction makes no sense if one is relative and the other is absolute
         let mut dx = lo.x_offset - base.x_offset;
         let mut dy = lo.y_offset - base.y_offset;
@@ -469,13 +469,56 @@ impl FileLock<'_> {
                         break;
                     }
                     dy += 1;
-                    dx = 0.;
+                    // TODO: This is broken for relative-x bases
+                    // If the base was relative, reaching this point means bailing
+                    // with a `None` result
+                    dx = -base.x_offset;
                 }
                 c => {
                     let hadv = self.filebuf.layout().advance_for(c);
                     if dy == y && dx + hadv * hdiv > x {
                         break;
                     }
+                    dx += hadv;
+                }
+            }
+            data = &data[adv..];
+            offset += adv as i64;
+        }
+        Some(DataAt {
+            dy,
+            dx,
+            offset,
+            data,
+        })
+    }
+
+    /// Looks up the character at `precise_offset`, returning its position
+    /// relative to `base_offset`.
+    /// If `precise_offset` is in the middle of a character, returns the next
+    /// character boundary.
+    pub fn lookup_offset(&self, base_offset: i64, precise_offset: i64) -> Option<DataAt> {
+        let loaded = &*self.loaded;
+        let (base, anchor) = loaded
+            .linemap
+            .offset_to_anchor(base_offset, precise_offset)?;
+        let mut offset = anchor.offset;
+        let mut data = loaded.data.longest_prefix(offset);
+        // Parse data before target position, accumulating x/y changes
+        let mut dx = anchor.x_offset - base.x_offset;
+        let mut dy = anchor.y_offset - base.y_offset;
+        while !data.is_empty() && offset < precise_offset {
+            let (c, adv) = decode_utf8(data);
+            match c.unwrap_or(LineMapper::REPLACEMENT_CHAR) {
+                LineMapper::NEWLINE => {
+                    dy += 1;
+                    // TODO: This is broken for relative-x bases
+                    // If the base was relative, reaching this point means bailing
+                    // with a `None` result
+                    dx = -base.x_offset;
+                }
+                c => {
+                    let hadv = self.filebuf.layout().advance_for(c);
                     dx += hadv;
                 }
             }
@@ -542,6 +585,38 @@ impl FileLock<'_> {
         self.filebuf.shared.sleeping.load()
     }
 
+    /// Moves the given offset by a certain amount of characters.
+    ///
+    /// O(n) in the amount of characters due to UTF-8.
+    /// May not have enough data to complete the offset.
+    /// In this case, it fails but returns the farthest it could get.
+    pub fn char_delta(&self, mut offset: i64, delta: i16) -> StdResult<i64, i64> {
+        if delta < 0 {
+            // Move backwards
+            let mut data = self.loaded.data.longest_suffix(offset);
+            for _ in 0..-delta {
+                if data.is_empty() {
+                    return Err(offset);
+                }
+                let (_c, rev) = decode_utf8_rev(data);
+                data = &data[..data.len() - rev];
+                offset -= rev as i64;
+            }
+        } else {
+            // Move forwards
+            let mut data = self.loaded.data.longest_prefix(offset);
+            for _ in 0..delta {
+                if data.is_empty() {
+                    return Err(offset);
+                }
+                let (_c, adv) = decode_utf8(data);
+                data = &data[adv..];
+                offset += adv as i64;
+            }
+        }
+        Ok(offset)
+    }
+
     /// Request the backend to copy the selected text.
     pub fn copy_selection(&mut self) {
         self.loaded.pending_sel_copy = true;
@@ -585,6 +660,8 @@ pub struct FilePos {
     pub delta_y: f64,
 }
 impl FilePos {
+    /// Returns the base offset, the Y position and X position.
+    /// Floors the Y position (which is usually what you want to do).
     pub fn floor(&self) -> (i64, i64, f64) {
         (self.base_offset, self.delta_y.floor() as i64, self.delta_x)
     }
