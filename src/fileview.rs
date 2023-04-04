@@ -468,6 +468,7 @@ impl FileView {
     /// release the lock, so we *really* don't want to incur this cost twice.
     fn bookkeep_file(&mut self, state: &mut WindowState, file: &mut FileLock) {
         // Apply selection movements
+        let moved = !self.move_queue.is_empty();
         for cmd in self.move_queue.drain(..) {
             // Move offset depending on the command type
             match cmd.kind {
@@ -515,29 +516,51 @@ impl FileView {
                     }
                 }
             }
-            // Figure out spacial position based on offset
-            let pos = file
-                .lookup_offset(self.scroll.pos.base_offset, self.selected.second)
-                .map(|at| FilePos {
-                    base_offset: self.scroll.pos.base_offset,
-                    delta_x: at.dx,
-                    delta_y: at.dy as f64,
-                });
-            self.selected.last_positions[1] = pos;
-            // Move scroll position to fit cursor within bounds
-            if let Some(pos) = pos {
-                let sz = self.scroll.last_view.size;
+            // Previous spacial position is now invalid
+            self.selected.last_positions[1] = None;
+            // Conditionally reset the selection
+            if cmd.reset {
+                self.selected.first = self.selected.second;
+                self.selected.last_positions[0] = self.selected.last_positions[1];
+            }
+        }
+        // Figure out spacial position of selection
+        for k in 0..2 {
+            let pos = &mut self.selected.last_positions[k];
+            if pos.is_none() {
+                let p = file
+                    .lookup_offset(self.scroll.pos.base_offset, self.selected.second)
+                    .map(|at| FilePos {
+                        base_offset: self.scroll.pos.base_offset,
+                        delta_x: at.dx,
+                        delta_y: at.dy as f64,
+                    });
+                *pos = p;
+            }
+        }
+        // Move scroll position to fit cursor within bounds
+        if moved {
+            let sz = self.scroll.last_view.size;
+            if let Some(pos) = self.selected.last_positions[1] {
                 let ylo = pos.delta_y + 1. + state.k.ui.cursor_padding - sz.y;
                 let yhi = pos.delta_y - state.k.ui.cursor_padding;
                 let xlo = pos.delta_x + state.k.ui.cursor_padding - sz.x;
                 let xhi = pos.delta_x - state.k.ui.cursor_padding;
                 self.scroll.pos.delta_y = self.scroll.pos.delta_y.clamp(ylo, yhi.max(ylo));
                 self.scroll.pos.delta_x = self.scroll.pos.delta_x.clamp(xlo, xhi.max(xlo));
-            }
-            // Conditionally reset the selection
-            if cmd.reset {
-                self.selected.first = self.selected.second;
-                self.selected.last_positions[0] = self.selected.last_positions[1];
+            } else {
+                // Rebase scroll position based on the selection offset
+                self.scroll.pos = FilePos {
+                    base_offset: self.selected.second,
+                    delta_y: if self.scroll.pos.base_offset <= self.selected.second {
+                        // Scroll from top to bottom
+                        -state.k.ui.cursor_padding
+                    } else {
+                        // Scroll from bottom to top
+                        -sz.y + state.k.ui.cursor_padding
+                    },
+                    delta_x: -sz.x / 2.,
+                };
             }
         }
         // Inform the backend about what area of the file to load (and keep loaded)

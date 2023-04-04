@@ -53,33 +53,50 @@ pub fn draw_withtext(
     };
 
     // Iterate over all characters on the screen and queue them up for rendering
-    let mut linenum_buf = String::new();
     let mut sel_box = ScreenRect {
         min: default(),
         max: default(),
     };
+    let absolute_start = file.lookup_offset(fview.scroll.pos.base_offset, 0);
     file.visit_rect(fview.scroll.last_view, |offset, dx, dy, c| {
         match c {
             None => {
                 // Starting a line
                 // Write line number
-                use std::fmt::Write;
-                linenum_buf.clear();
-                let _ = write!(linenum_buf, "{}", dy + 1);
-                let mut x = text_view.min.x - state.k.g.linenum_pad;
-                let y = text_view.min.y
-                    + ((dy + 1) as f64 - fview.scroll.pos.delta_y) as f32 * state.k.g.font_height;
-                for c in linenum_buf.bytes().rev() {
-                    x -= ftab.file.layout().advance_for(c as u32) as f32 * state.k.g.font_height;
-                    state.draw.linenums.push(
-                        &mut state.draw.glyphs,
-                        state.k.g.linenum_color,
-                        Glyph {
-                            id: state.draw.font.glyph_id(c as char),
-                            scale: state.k.g.font_height.into(),
-                            position: (x, y).into(),
-                        },
-                    );
+                {
+                    let mut x = text_view.min.x - state.k.g.linenum_pad;
+                    let y = text_view.min.y
+                        + ((dy + 1) as f64 - fview.scroll.pos.delta_y) as f32
+                            * state.k.g.font_height;
+                    let mut draw_char = |c| {
+                        x -=
+                            ftab.file.layout().advance_for(c as u32) as f32 * state.k.g.font_height;
+                        state.draw.linenums.push(
+                            &mut state.draw.glyphs,
+                            state.k.g.linenum_color,
+                            Glyph {
+                                id: state.draw.font.glyph_id(c),
+                                scale: state.k.g.font_height.into(),
+                                position: (x, y).into(),
+                            },
+                        );
+                    };
+                    let linenum = match absolute_start.as_ref() {
+                        Some(file_start) => dy - file_start.dy + 1,
+                        None => dy,
+                    };
+                    if linenum == 0 {
+                        draw_char('0');
+                    } else {
+                        let mut n = linenum.abs();
+                        while n != 0 {
+                            draw_char((b'0' + (n % 10) as u8) as char);
+                            n /= 10;
+                        }
+                    }
+                    if absolute_start.is_none() {
+                        draw_char(if linenum < 0 { '-' } else { '+' });
+                    }
                 }
                 // Draw previous selection box
                 if sel_box.min.x < sel_box.max.x {
