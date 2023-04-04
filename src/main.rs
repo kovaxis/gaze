@@ -70,7 +70,7 @@ impl InputState {
         (self.keys_down[(key >> 6) as usize] >> (key & 0x3F)) & 1 != 0
     }
 
-    fn mouse(&self, btn: u16) -> bool {
+    fn _mouse(&self, btn: u16) -> bool {
         if btn >= 64 {
             false
         } else {
@@ -211,7 +211,7 @@ impl WindowState {
         use gl::winit::event::{Event, WindowEvent};
         // Dispatch event to active file view
         if let Some(mut ftab) = self.take_ftab(self.cur_tab) {
-            ftab.view.handle_event(self, &ev);
+            ftab.view.handle_event(&ftab.file, self, &ev);
             self.put_ftab(self.cur_tab, ftab);
         }
         // Handle event at the window level

@@ -216,10 +216,14 @@ enum MoveKind {
     /// Move directly to the character boundary closest to the
     /// given file position.
     Absolute(FilePos),
+    /// Move directly to an offset within the file.
+    Raw(i64),
     /// Move a number of characters to the left/right.
     CharDelta(i16),
     /// Move a number of lines up/down.
     LineDelta(i64),
+    /// Move a certain spacial distance left/right.
+    HorizontalDelta(f64),
 }
 
 /// Cursor movement commands.
@@ -465,19 +469,21 @@ impl FileView {
     fn bookkeep_file(&mut self, _state: &mut WindowState, file: &mut FileLock) {
         // Apply selection movements
         for cmd in self.move_queue.drain(..) {
+            // Move offset depending on the command type
             match cmd.kind {
                 MoveKind::Absolute(pos) => {
+                    // Select based on a spacial position
                     let (base, y, x) = pos.floor();
                     if let Some(at) = file.lookup_pos(base, y, x, 0.5) {
                         self.selected.second = at.offset;
-                        self.selected.last_positions[1] = Some(FilePos {
-                            base_offset: base,
-                            delta_y: at.dy as f64,
-                            delta_x: at.dx,
-                        });
                     }
                 }
+                MoveKind::Raw(off) => {
+                    // Select based on a raw file offset
+                    self.selected.second = off;
+                }
                 MoveKind::CharDelta(delta) => {
+                    // Move the current selection by this amount of characters
                     // TODO: This may leave the cursor in the middle of a UTF-8 character
                     // if we are at the edge of loaded data
                     // Figure out what to do about it
@@ -485,32 +491,39 @@ impl FileView {
                         .char_delta(self.selected.second, delta)
                         .unwrap_or_else(|e| e);
                     self.selected.second = off;
-                    self.selected.last_positions[1] = file
-                        .lookup_offset(self.scroll.pos.base_offset, off)
-                        .map(|at| FilePos {
-                            base_offset: self.scroll.pos.base_offset,
-                            delta_x: at.dx,
-                            delta_y: at.dy as f64,
-                        });
                 }
                 MoveKind::LineDelta(delta) => {
+                    // Move the current selection by this amount of lines
                     if let Some(at) = file.lookup_offset(self.selected.second, self.selected.second)
                     {
                         if let Some(at_target) =
                             file.lookup_pos(self.selected.second, at.dy + delta, at.dx, 0.5)
                         {
                             self.selected.second = at_target.offset;
-                            self.selected.last_positions[1] = file
-                                .lookup_offset(self.scroll.pos.base_offset, self.selected.second)
-                                .map(|at| FilePos {
-                                    base_offset: self.scroll.pos.base_offset,
-                                    delta_x: at.dx,
-                                    delta_y: at.dy as f64,
-                                });
+                        }
+                    }
+                }
+                MoveKind::HorizontalDelta(delta) => {
+                    // Move the current selection by this distance
+                    if let Some(at) = file.lookup_offset(self.selected.second, self.selected.second)
+                    {
+                        if let Some(at_target) =
+                            file.lookup_pos(self.selected.second, at.dy, at.dx + delta, 0.5)
+                        {
+                            self.selected.second = at_target.offset;
                         }
                     }
                 }
             }
+            // Figure out spacial position based on offset
+            self.selected.last_positions[1] = file
+                .lookup_offset(self.scroll.pos.base_offset, self.selected.second)
+                .map(|at| FilePos {
+                    base_offset: self.scroll.pos.base_offset,
+                    delta_x: at.dx,
+                    delta_y: at.dy as f64,
+                });
+            // Conditionally reset the selection
             if cmd.reset {
                 self.selected.first = self.selected.second;
                 self.selected.last_positions[0] = self.selected.last_positions[1];
@@ -529,7 +542,12 @@ impl FileView {
         }
     }
 
-    pub fn handle_event(&mut self, state: &mut WindowState, ev: &gl::winit::event::Event<()>) {
+    pub fn handle_event(
+        &mut self,
+        file: &FileBuffer,
+        state: &mut WindowState,
+        ev: &gl::winit::event::Event<()>,
+    ) {
         use gl::winit::event::{Event, WindowEvent};
         match ev {
             Event::WindowEvent { event, .. } => match event {
@@ -539,6 +557,59 @@ impl FileView {
                     match input.virtual_keycode {
                         Some(C) if down && state.keys.ctrl() => {
                             self.send_sel_copy.set(true);
+                            state.redraw();
+                        }
+                        Some(A) if down && state.keys.ctrl() => {
+                            self.move_selection(MoveCmd {
+                                reset: true,
+                                kind: MoveKind::Raw(0),
+                            });
+                            self.move_selection(MoveCmd {
+                                reset: false,
+                                kind: MoveKind::Raw(file.file_size()),
+                            });
+                            state.redraw();
+                        }
+                        Some(Home) if down => {
+                            let kind = if state.keys.ctrl() {
+                                MoveKind::Raw(0)
+                            } else {
+                                MoveKind::HorizontalDelta(f64::NEG_INFINITY)
+                            };
+                            self.move_selection(MoveCmd {
+                                reset: !state.keys.shift(),
+                                kind,
+                            });
+                            state.redraw();
+                        }
+                        Some(End) if down => {
+                            let kind = if state.keys.ctrl() {
+                                MoveKind::Raw(file.file_size())
+                            } else {
+                                MoveKind::HorizontalDelta(f64::INFINITY)
+                            };
+                            self.move_selection(MoveCmd {
+                                reset: !state.keys.shift(),
+                                kind,
+                            });
+                            state.redraw();
+                        }
+                        Some(PageUp) if down => {
+                            self.move_selection(MoveCmd {
+                                reset: !state.keys.shift(),
+                                kind: MoveKind::LineDelta(
+                                    -self.scroll.last_view.size.y.floor().max(1.) as i64,
+                                ),
+                            });
+                            state.redraw();
+                        }
+                        Some(PageDown) if down => {
+                            self.move_selection(MoveCmd {
+                                reset: !state.keys.shift(),
+                                kind: MoveKind::LineDelta(
+                                    self.scroll.last_view.size.y.floor().max(1.) as i64,
+                                ),
+                            });
                             state.redraw();
                         }
                         Some(Left) if down => {

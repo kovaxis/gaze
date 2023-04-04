@@ -142,6 +142,7 @@ struct Shared {
     friendly_name: String,
     stop: AtomicCell<bool>,
     sleeping: AtomicCell<bool>,
+    last_file_size: AtomicCell<i64>,
     loaded: Mutex<LoadedData>,
     k: Cfg,
     layout: CharLayout,
@@ -161,6 +162,7 @@ impl FileManager {
             .context("failed to determine length of file")?
             .try_into()
             .context("file way too large")?; // can only fail for files larger than 2^63-1
+        shared.last_file_size.store(file_size);
         let memk = &shared.k.f.linemap_mem;
         let max_linemap_memory = ((file_size as f64 * memk.fract)
             .clamp(memk.min_mb * 1024. * 1024., memk.max_mb * 1024. * 1024.)
@@ -370,6 +372,7 @@ impl FileBuffer {
             path,
             stop: false.into(),
             sleeping: false.into(),
+            last_file_size: 0.into(),
             layout,
             loaded: LoadedData {
                 data: SparseData::new(
@@ -412,6 +415,10 @@ impl FileBuffer {
 
     pub fn friendly_name(&self) -> &str {
         &self.shared.friendly_name
+    }
+
+    pub fn file_size(&self) -> i64 {
+        self.shared.last_file_size.load()
     }
 }
 
