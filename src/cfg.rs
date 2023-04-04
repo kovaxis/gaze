@@ -32,6 +32,8 @@ select_button = 0
 tab_select_button = 0
 # Button used to kill tabs.
 tab_kill_button = 2
+# Keep the cursor at least this amount of lines within the screen.
+cursor_padding = 1.5
 
 [visual]
 # Height in pixels of a line of text.
@@ -216,6 +218,7 @@ pub struct Ui {
     pub select_button: u16,
     pub tab_select_button: u16,
     pub tab_kill_button: u16,
+    pub cursor_padding: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

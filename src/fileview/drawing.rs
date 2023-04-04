@@ -26,6 +26,10 @@ pub fn draw_withtext(
 
     let text_view = FileView::text_view(&state.k, fview.view);
 
+    // Do any bookkeeping that requires the lock
+    // This includes moving the selection, possibly moving the scroll position with it
+    fview.bookkeep_file(state, &mut file);
+
     // Determine the bounds of the loaded area, and clamp the scroll position to it
     let scroll_bounds = file.bounding_rect(fview.scroll.pos.base_offset);
     fview.scroll.pos = scroll_bounds.clamp_pos(fview.scroll.pos);
@@ -40,10 +44,6 @@ pub fn draw_withtext(
     if !fview.drag.is_scrollbar() {
         fview.scroll.last_bounds = scroll_bounds;
     }
-
-    // Do any bookkeeping that requires the lock
-    // This includes moving the selection
-    fview.bookkeep_file(state, &mut file);
 
     // Get the selection range
     let sel_range = if fview.selected.first <= fview.selected.second {

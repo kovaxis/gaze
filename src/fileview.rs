@@ -466,7 +466,7 @@ impl FileView {
     /// the file twice per frame, and that is very suboptimal.
     /// The file manager might take single-digit amount of milliseconds to
     /// release the lock, so we *really* don't want to incur this cost twice.
-    fn bookkeep_file(&mut self, _state: &mut WindowState, file: &mut FileLock) {
+    fn bookkeep_file(&mut self, state: &mut WindowState, file: &mut FileLock) {
         // Apply selection movements
         for cmd in self.move_queue.drain(..) {
             // Move offset depending on the command type
@@ -516,13 +516,24 @@ impl FileView {
                 }
             }
             // Figure out spacial position based on offset
-            self.selected.last_positions[1] = file
+            let pos = file
                 .lookup_offset(self.scroll.pos.base_offset, self.selected.second)
                 .map(|at| FilePos {
                     base_offset: self.scroll.pos.base_offset,
                     delta_x: at.dx,
                     delta_y: at.dy as f64,
                 });
+            self.selected.last_positions[1] = pos;
+            // Move scroll position to fit cursor within bounds
+            if let Some(pos) = pos {
+                let sz = self.scroll.last_view.size;
+                let ylo = pos.delta_y + 1. + state.k.ui.cursor_padding - sz.y;
+                let yhi = pos.delta_y - state.k.ui.cursor_padding;
+                let xlo = pos.delta_x + state.k.ui.cursor_padding - sz.x;
+                let xhi = pos.delta_x - state.k.ui.cursor_padding;
+                self.scroll.pos.delta_y = self.scroll.pos.delta_y.clamp(ylo, yhi.max(ylo));
+                self.scroll.pos.delta_x = self.scroll.pos.delta_x.clamp(xlo, xhi.max(xlo));
+            }
             // Conditionally reset the selection
             if cmd.reset {
                 self.selected.first = self.selected.second;
