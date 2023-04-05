@@ -1,4 +1,4 @@
-use crate::prelude::*;
+use crate::{cfg::Cfg, prelude::*};
 
 use super::{LoadedData, LoadedDataGuard, Surroundings};
 
@@ -184,8 +184,10 @@ impl SparseData {
         {
             let l = &sparse.segments[l_idx].data;
             let r = &sparse.segments[l_idx + 1].data;
-            l_realloc = l.capacity() >= sparse.realloc_threshold && l.spare_right() < r.len();
-            r_realloc = r.capacity() >= sparse.realloc_threshold && r.spare_left() < l.len();
+            l_realloc =
+                (l.capacity() + r.len()) >= sparse.realloc_threshold && l.spare_right() < r.len();
+            r_realloc =
+                (r.capacity() + l.len()) >= sparse.realloc_threshold && r.spare_left() < l.len();
             realloc_size = (l.len() + r.len()).next_power_of_two();
             into_left = match force_into_left {
                 Some(il) => il,
@@ -223,9 +225,8 @@ impl SparseData {
                 Self::merge_segments(handle, l_idx+1, Some(false));
             });
         }
-        // TODO: Make sure we don't stall while growing the data `Demem`
-        // In cases where a large grow needs to be done, this entails allocating a separate clone
-        // and slowly copying the data over while regularly bumping the mutex
+        // Copy data from one segment to the other
+        // Make sure to bump the mutex regularly
         loop {
             let batch_size = sparse.merge_batch_size;
             let (l, r) = get_two(sparse, l_idx);
@@ -252,9 +253,13 @@ impl SparseData {
             lock_sparse!(handle, store, sparse => bump);
         }
         // Remove the empty segment
-        sparse
+        let empty = sparse
             .segments
             .remove(l_idx + if into_left { 1 } else { 0 });
+        // Drop the segment data with the lock unheld
+        // Turns out dropping large buffers takes a pretty long time
+        drop(store);
+        drop(empty);
     }
 
     /// Inserts and merges the given data range.
@@ -286,7 +291,7 @@ impl SparseData {
 
     /// Clean up memory if we are over the target memory usage.
     /// Only gurantees keeping the given offset range in memory.
-    pub fn cleanup(handle: SparseHandle, keep: ops::Range<i64>) {
+    pub fn cleanup(k: &Cfg, handle: SparseHandle, keep: ops::Range<i64>) {
         lock_sparse!(handle, store, sparse);
 
         let mut total_cap = 0;
@@ -294,8 +299,12 @@ impl SparseData {
             total_cap += seg.data.capacity();
         }
         if total_cap > sparse.max_loaded {
+            let mut timing = TimingLog::new();
+
             let mut shrinked_by = 0;
-            // Free everything outside the keep range
+            // Mark everything outside the keep range as freed
+            // Don't actually free them with the lock held, though
+            let mut free_later = vec![];
             sparse.segments.retain_mut(|s| {
                 // Remove the prefix that is outside `keep`
                 let lconsume = (keep.start - s.offset).clamp(0, s.data.len() as i64);
@@ -308,15 +317,20 @@ impl SparseData {
                 // Drop the segment if it is empty
                 if s.data.is_empty() {
                     shrinked_by += s.data.capacity();
+                    free_later.push(mem::replace(&mut s.data, Demem::new()));
                 }
                 !s.data.is_empty()
             });
+
+            timing.mark("clip-segments");
+
             // Free spare memory
             // This might require some mutex-bumping for latency
+            let mut data_acc = 0;
             for i in 0..sparse.segments.len() {
                 let s = &sparse.segments[i];
                 shrinked_by += s.data.capacity() - s.data.len();
-                if s.data.spare_left() > 0 && s.data.len() >= sparse.realloc_threshold {
+                if data_acc + s.data.capacity() >= sparse.realloc_threshold {
                     // Data is too large to relocate in one go
                     // First, create a new copy with the exact needed size
                     let size = s.data.len();
@@ -325,30 +339,62 @@ impl SparseData {
                         new = Demem::with_capacity(0, size);
                     });
                     // Then, copy live data to this new location
-                    while new.len() < size {
+                    loop {
                         let s = &sparse.segments[i];
                         let batch_size = sparse.merge_batch_size.min(size - new.len());
                         new.extend_right(&s.data[new.len()..new.len() + batch_size]);
+                        if new.len() >= size {
+                            break;
+                        }
                         // Be mindful to keep bumping the mutex
                         lock_sparse!(handle, store, sparse => bump);
                     }
                     // Finally, replace the old container with the new tight container
-                    // This will drop the old container and free its memory
-                    sparse.segments[i].data = new;
+                    // This will drop the old container and free its memory!
+                    // (So do it off the lock)
+                    free_later.push(mem::replace(&mut sparse.segments[i].data, new));
+                    data_acc = 0;
                 } else {
                     // Data is small enough to shrink in one go
+                    data_acc += s.data.capacity();
                     sparse.segments[i].data.shrink_to_fit();
                 }
             }
+
+            timing.mark("shrink-to-fit");
+
+            // Free buffers with the lock released
+            if !free_later.is_empty() {
+                lock_sparse!(handle, store, sparse => unlocked {
+                    drop(free_later);
+                });
+            }
+
+            timing.mark("free-buffers");
+
             // Report shrinkage
-            println!(
+            use std::fmt::Write;
+            let mut buf = String::new();
+            let _ = writeln!(
+                buf,
                 "memory usage was at {:.3}/{:.3}MB, so {:.3}MB were freed, leaving these segments only:",
                 total_cap as f64 / 1024. / 1024.,
                 sparse.max_loaded as f64 / 1024. / 1024.,
                 shrinked_by as f64 / 1024. / 1024.,
             );
             for s in sparse.segments.iter() {
-                println!("  [{}, {})", s.offset, s.offset + s.data.len() as i64);
+                let _ = writeln!(buf, "  [{}, {})", s.offset, s.offset + s.data.len() as i64);
+            }
+
+            timing.mark("log-build");
+
+            drop(store);
+            print!("{}", buf);
+
+            timing.mark("log-print");
+
+            if k.log.mem_release {
+                timing.log("mem-release");
             }
         }
     }
@@ -419,6 +465,13 @@ impl From<Vec<u8>> for Demem {
     }
 }
 impl Demem {
+    fn new() -> Self {
+        Self {
+            mem: Vec::new(),
+            start: 0,
+        }
+    }
+
     fn with_capacity(lspare: usize, rspare: usize) -> Self {
         let mut mem = Vec::with_capacity(lspare + rspare);
         mem.resize(lspare, 0);

@@ -609,7 +609,7 @@ impl LineMapper {
             lock_linemap!(linemap, lmap_store, lmap => bump);
         }
         // Finally, remove the empty source segment
-        lmap.segments.remove(l_idx + if into_left { 1 } else { 0 });
+        let empty = lmap.segments.remove(l_idx + if into_left { 1 } else { 0 });
         // DEBUG: Sanity check
         if false {
             println!(
@@ -653,6 +653,10 @@ impl LineMapper {
                 lmap.dump_anchors();
             }
         }
+        // Drop the empty segment while the lock is released
+        // (Dropping large buffers takes time)
+        drop(lmap_store);
+        drop(empty);
     }
 
     fn insert_segment(&self, linemap: LineMapHandle, seg: MappedSegment) {

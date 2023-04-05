@@ -287,7 +287,7 @@ impl FileManager {
             let mut read_buf = mem::take(&mut self.read_buf);
             read_buf.truncate(len);
             SparseData::insert_data(&self.shared.loaded, offset, read_buf);
-            SparseData::cleanup(&self.shared.loaded, keep);
+            SparseData::cleanup(&self.shared.k, &self.shared.loaded, keep);
         }
 
         let finish = Instant::now();
