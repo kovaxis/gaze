@@ -103,7 +103,7 @@ segment_timing = false
 segment_details = false
 # Warn when the shared block is locked for more than this amount of milliseconds.
 # Disables warning if negative.
-lock_warn_ms = -1
+lock_warn_ms = 5
 
 [file]
 # Place an upper limit on the amount of file data loaded at once in memory

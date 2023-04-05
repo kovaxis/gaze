@@ -136,7 +136,7 @@ impl LoadedData {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Surroundings {
     In(i64, i64),
     Out(i64, i64),
@@ -664,7 +664,7 @@ impl FileLock<'_> {
 ///     This allows the user to jump to the end of the file or the middle of the file,
 ///     without even knowing wether the file is all a single line or thousands of lines.
 ///     This is similar to a "go to line" feature.
-#[derive(Copy, Clone, PartialEq, Default)]
+#[derive(Copy, Clone, PartialEq, Default, Debug)]
 pub struct FilePos {
     /// A reference offset within the file.
     /// This offset is only modified when scrolling jaggedly (ie. jumping directly
@@ -694,7 +694,7 @@ impl FilePos {
 /// Represents a rectangle of the file.
 /// Does **NOT** represent a linear start-end range, it literally represents
 /// a rectangle view into the file.
-#[derive(Copy, Clone, PartialEq, Default)]
+#[derive(Copy, Clone, PartialEq, Default, Debug)]
 pub struct FileRect {
     /// The top-left corner.
     pub corner: FilePos,

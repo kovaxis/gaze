@@ -85,6 +85,7 @@ impl SparseData {
     /// If it's not, yield the inner edges of the surrounding segments.
     /// If there is no segment to a given side, yield the start/end of the file.
     pub fn find_surroundings(&self, offset: i64) -> Surroundings {
+        let offset = offset.min(self.file_size - 1);
         for (i, s) in self.segments.iter().enumerate() {
             if s.offset + s.data.len() as i64 > offset {
                 if s.offset <= offset {

@@ -468,9 +468,10 @@ impl FileView {
     /// release the lock, so we *really* don't want to incur this cost twice.
     fn bookkeep_file(&mut self, state: &mut WindowState, file: &mut FileLock) {
         // Apply selection movements
-        let moved = !self.move_queue.is_empty();
+        let previous = self.selected.second;
         for cmd in self.move_queue.drain(..) {
             // Move offset depending on the command type
+            let current = self.selected.second;
             match cmd.kind {
                 MoveKind::Absolute(pos) => {
                     // Select based on a spacial position
@@ -488,17 +489,13 @@ impl FileView {
                     // TODO: This may leave the cursor in the middle of a UTF-8 character
                     // if we are at the edge of loaded data
                     // Figure out what to do about it
-                    let off = file
-                        .char_delta(self.selected.second, delta)
-                        .unwrap_or_else(|e| e);
+                    let off = file.char_delta(current, delta).unwrap_or_else(|e| e);
                     self.selected.second = off;
                 }
                 MoveKind::LineDelta(delta) => {
                     // Move the current selection by this amount of lines
-                    if let Some(at) = file.lookup_offset(self.selected.second, self.selected.second)
-                    {
-                        if let Some(at_target) =
-                            file.lookup_pos(self.selected.second, at.dy + delta, at.dx, 0.5)
+                    if let Some(at) = file.lookup_offset(current, current) {
+                        if let Some(at_target) = file.lookup_pos(current, at.dy + delta, at.dx, 0.5)
                         {
                             self.selected.second = at_target.offset;
                         }
@@ -506,10 +503,8 @@ impl FileView {
                 }
                 MoveKind::HorizontalDelta(delta) => {
                     // Move the current selection by this distance
-                    if let Some(at) = file.lookup_offset(self.selected.second, self.selected.second)
-                    {
-                        if let Some(at_target) =
-                            file.lookup_pos(self.selected.second, at.dy, at.dx + delta, 0.5)
+                    if let Some(at) = file.lookup_offset(current, current) {
+                        if let Some(at_target) = file.lookup_pos(current, at.dy, at.dx + delta, 0.5)
                         {
                             self.selected.second = at_target.offset;
                         }
@@ -539,7 +534,7 @@ impl FileView {
             }
         }
         // Move scroll position to fit cursor within bounds
-        if moved {
+        if self.selected.second != previous {
             let sz = self.scroll.last_view.size;
             if let Some(pos) = self.selected.last_positions[1] {
                 let ylo = pos.delta_y + 1. + state.k.ui.cursor_padding - sz.y;
@@ -554,10 +549,24 @@ impl FileView {
                     base_offset: self.selected.second,
                     delta_y: if self.scroll.pos.base_offset <= self.selected.second {
                         // Scroll from top to bottom
-                        -state.k.ui.cursor_padding
+                        // NOTE: Currently, when rendering we clamp the scroll position to
+                        // the loaded area.
+                        // This usually makes sense, but in some cases it doesn't
+                        // For example, if here we jump to the end of the file, we'd like
+                        // the scroll window to *end* at the end of the file.
+                        // However, because the end of the file may not be loaded yet, we
+                        // will clamp the scroll window to an zero-sized rect, and we will
+                        // end up having the scroll window aligned to *start* at the end
+                        // of the file.
+                        // TODO: Make the clamping logic clamp the window to *contain* some
+                        // loaded point of file, instead of forcing it to start at some
+                        // loaded point.
+                        // Special-case the beggining of the file, to disallow scrolling
+                        // before the start of the file.
+                        1. + state.k.ui.cursor_padding - sz.y
                     } else {
                         // Scroll from bottom to top
-                        -sz.y + state.k.ui.cursor_padding
+                        -state.k.ui.cursor_padding
                     },
                     delta_x: -sz.x / 2.,
                 };
