@@ -4,8 +4,8 @@ const CFG_PATH: &str = "gaze.conf";
 const DEFAULT_CFG: &str = r#"
 [ui]
 # Grab button and hold
-# 1 is right click
-grab_button = { button = 1, hold = true }
+# 2 is middle click
+grab_button = { button = 2, hold = true }
 # Invert the vertical scrolling direction when scrolling with the mouse/trackpad wheel.
 invert_wheel_y = false
 # Invert the horizontal scrolling direction when scrolling with the mouse/trackpad wheel.
@@ -16,16 +16,17 @@ scrollbar_button = { button = 0, hold = true }
 # Modifies the behaviour when clicking on the scrollbar but outside the scrollbar handle.
 drag_scrollbar = false
 # Slide button and hold
-# 2 is middle click
-slide_button = { button = 2, hold = false }
-# Pixels of dead area when sliding with the middle click
+# 1 is right click
+slide_button = { button = 1, hold = true }
+# Side length in pixels of the dead area square
+# When sliding, placing the mouse inside this square does not slide at all
 slide_dead_area = 20
 # Base sliding speed, in lines per second
-slide_speed = 20
+slide_speed = 50
 # The base sliding speed is this amount of screensizes away from the center
-slide_base_dist = 0.10
+slide_base_dist = 0.12
 # Every this amount of screensizes the sliding speed is doubled
-slide_double_dist = 0.055
+slide_double_dist = 0.035
 # Button used to select text
 select_button = 0
 # Button used to switch between tabs.
@@ -49,9 +50,9 @@ text_color = [255, 255, 255, 255]
 # Background color.
 bg_color = [3, 3, 4, 255]
 # Color of selected text
-selection_color = [0, 0, 0, 255]
+selection_color = [255, 255, 255, 255]
 # Color of selected text highlight
-selection_bg_color = [20, 20, 210, 255]
+selection_bg_color = [10, 60, 180, 255]
 # Y offset applied to the selection highlight, proportional to the font height.
 selection_offset = 0.2
 # Color of the scrollbar background.
@@ -69,7 +70,7 @@ slide_icon = { radius = 24, detail = 20, bg = [255, 255, 255, 255], fg = [0, 0, 
 # Height of the tabs.
 tab_height = 24
 # Minimum/maximum tab width.
-tab_width = [64, 128]
+tab_width = [64, 300]
 # Gap between tabs.
 tab_gap = 2
 # Height of the tab title font.
