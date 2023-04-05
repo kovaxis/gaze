@@ -469,7 +469,6 @@ impl FileLock<'_> {
     /// `hdiv = 0.5` rounds like `round`, to the closest boundary to `x`
     /// `hdiv = 0` rounds like `ceil`, to the first boundary after `x`
     pub fn lookup_pos(&self, base_offset: i64, y: i64, x: f64, hdiv: f64) -> Option<DataAt> {
-        let coarse = Instant::now();
         let loaded = &*self.loaded;
         let (base, lo) = loaded.linemap.pos_to_anchor(base_offset, y, x)?;
         let mut offset = lo.offset;
@@ -477,8 +476,6 @@ impl FileLock<'_> {
         // NOTE: This subtraction makes no sense if one is relative and the other is absolute
         let mut dx = lo.x_offset - base.x_offset;
         let mut dy = lo.y_offset - base.y_offset;
-        let fine = Instant::now();
-        let mut fine_count = 0;
         // Remove excess data before the target position
         while !data.is_empty() && (dy < y || dy == y && dx < x) {
             let (c, adv) = decode_utf8(data);
@@ -501,27 +498,8 @@ impl FileLock<'_> {
                     dx += hadv;
                 }
             }
-            fine_count += 1;
             data = &data[adv..];
             offset += adv as i64;
-        }
-        if fine_count > 100000 {
-            eprintln!(
-                "{:.4} coarse and {:.4} fine on {} characters",
-                (fine - coarse).as_secs_f64(),
-                fine.elapsed().as_secs_f64(),
-                fine_count
-            );
-            eprintln!(
-                "requested for {}:{}:{}, got {}:{}:{}",
-                base_offset,
-                y,
-                x,
-                lo.offset,
-                lo.y_offset - base.y_offset,
-                lo.x_offset - base.x_offset
-            );
-            self.loaded.linemap.dump_anchors();
         }
         Some(DataAt {
             dy,

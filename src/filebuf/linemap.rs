@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, ops::DerefMut};
+use std::collections::VecDeque;
 
 use crate::prelude::*;
 
@@ -415,16 +415,6 @@ impl LineMapper {
             // doing this correctly is way too expensive with the current implementation
             // The length of the relative line will also be temporarily wrong
             let (l, r) = get_two(lmap, l_idx);
-            /*{
-                let a = mem::take(&mut l.anchors);
-                let b = mem::take(&mut r.anchors);
-                eprintln!(
-                    "merging with into_left = {:?}, lseg = {:?} ({} anchors), rseg = {:?} ({} anchors)",
-                    into_left, l, a.len(), r, b.len(),
-                );
-                l.anchors = a;
-                r.anchors = b;
-            }*/
             let mut wide = l.widest_line.max(r.widest_line);
             if l.first_absolute < l.anchors.len() {
                 // Factor the absolute line that is created by tacking the relative
@@ -586,7 +576,6 @@ impl LineMapper {
                 rdst.base_x_relative += shift_x;
                 for i in (0..batch_size).rev() {
                     let mut a = *lsrc.anchors.back().unwrap();
-                    let old_a = a;
                     if i != 0 {
                         // Do not remove the last anchor, because it is both the end anchor
                         // of the left segment and the start anchor of the right segment,
@@ -607,10 +596,6 @@ impl LineMapper {
                     }
                     a.y_offset = a.y_offset + (-src_end_anchor.y_offset - rdst.base_y);
                     rdst.anchors.push_front(a);
-                    // eprintln!(
-                    //     "moved anchor from left as {:?} into right as {:?} with lsrc_abs = {:?} and rdst_abs = {:?}?",
-                    //     old_a, a, src_abs, true,
-                    // );
                 }
                 // Keep the end and start offsets in sync with the endpoint anchors
                 let rdst_start_anchor = rdst.anchors.front().unwrap();
@@ -624,47 +609,49 @@ impl LineMapper {
         }
         // Finally, remove the empty source segment
         lmap.segments.remove(l_idx + if into_left { 1 } else { 0 });
-        // TEST: Sanity check
-        /*println!(
-            "doing sanity check after merging (into_left = {:?})",
-            into_left
-        );
-        struct DumpOnPanic<'a>(&'a LineMap);
-        impl Drop for DumpOnPanic<'_> {
-            fn drop(&mut self) {
-                self.0.dump_anchors();
+        // DEBUG: Sanity check
+        if false {
+            println!(
+                "doing sanity check after merging (into_left = {:?})",
+                into_left
+            );
+            struct DumpOnPanic<'a>(&'a LineMap);
+            impl Drop for DumpOnPanic<'_> {
+                fn drop(&mut self) {
+                    self.0.dump_anchors();
+                }
+            }
+            let dump = DumpOnPanic(lmap);
+            let mut touching = false;
+            for s in lmap.segments.iter() {
+                if s.start >= s.end {
+                    touching = true;
+                }
+                assert_eq!(s.start, s.anchors.front().unwrap().offset);
+                assert_eq!(s.end, s.anchors.back().unwrap().offset);
+                assert!(s.first_absolute <= s.anchors.len());
+                assert_eq!(s.anchors.front().unwrap().y_offset + s.base_y, 0);
+                for i in 1..s.anchors.len() {
+                    let a = s.anchors[i - 1];
+                    let b = s.anchors[i];
+                    assert!(a.offset < b.offset);
+                    assert!(a.y_offset <= b.y_offset);
+                }
+            }
+            for i in 1..lmap.segments.len() {
+                let s = &lmap.segments[i];
+                let p = &lmap.segments[i - 1];
+                if p.end >= s.start {
+                    touching = true;
+                }
+            }
+            mem::forget(dump);
+            if touching {
+                println!("adjacent/empty segments are present, dumping...");
+                eprintln!("adjacent/empty segments are present, dumping...");
+                lmap.dump_anchors();
             }
         }
-        let dump = DumpOnPanic(lmap);
-        let mut touching = false;
-        for s in lmap.segments.iter() {
-            if s.start >= s.end {
-                touching = true;
-            }
-            assert_eq!(s.start, s.anchors.front().unwrap().offset);
-            assert_eq!(s.end, s.anchors.back().unwrap().offset);
-            assert!(s.first_absolute <= s.anchors.len());
-            assert_eq!(s.anchors.front().unwrap().y_offset + s.base_y, 0);
-            for i in 1..s.anchors.len() {
-                let a = s.anchors[i - 1];
-                let b = s.anchors[i];
-                assert!(a.offset < b.offset);
-                assert!(a.y_offset <= b.y_offset);
-            }
-        }
-        for i in 1..lmap.segments.len() {
-            let s = &lmap.segments[i];
-            let p = &lmap.segments[i - 1];
-            if p.end >= s.start {
-                touching = true;
-            }
-        }
-        mem::forget(dump);
-        if touching {
-            println!("adjacent/empty segments are present, dumping...");
-            eprintln!("adjacent/empty segments are present, dumping...");
-            lmap.dump_anchors();
-        }*/
     }
 
     fn insert_segment(&self, linemap: LineMapHandle, seg: MappedSegment) {
@@ -702,9 +689,6 @@ impl LineMapper {
             }
         }
         // insert segment, possibly adjacent to the nearby segments
-        if merge_left && merge_right {
-            println!("merging left & right at [{}, {})", seg.start, seg.end);
-        }
         lmap.segments.splice(i..j, std::iter::once(seg));
         // slowly merge the segments, regularly unlocking the linemap
         drop(lmap_store);
@@ -751,12 +735,6 @@ impl LineMapper {
             };
             // process data first without locking the linemap
             let seg = self.create_segment(l, &data[..(r - l) as usize], rigid_left, rigid_right);
-            if l != r {
-                println!(
-                    "processing segment [{}, {}) resulting from [{}, {})",
-                    seg.start, seg.end, l, r
-                );
-            }
             rigid_left = true;
             // insert the data into the linemap
             self.insert_segment(linemap, seg);
