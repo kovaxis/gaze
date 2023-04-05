@@ -245,6 +245,7 @@ pub struct DrawState {
     pub slide_icon: Vec<FlatVertex>,
     pub aux_vbo: VertexBuf<FlatVertex>,
     pub aux_text: TextScope,
+    pub timing: TimingLog,
 }
 impl DrawState {
     pub fn new(display: &Display, font: &FontArc, k: &Cfg) -> Result<Self> {
@@ -264,6 +265,7 @@ impl DrawState {
             slide_icon: VertexBuf::build_slide_icon(k),
             aux_vbo: VertexBuf::new(display)?,
             aux_text: TextScope::new(display)?,
+            timing: TimingLog::new(),
         })
     }
 }
@@ -304,6 +306,8 @@ impl Drop for FrameCtx {
 
 /// May return an instant specifying when is the next redraw due.
 pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
+    state.draw.timing.mark("inter-frame");
+
     // Initialize frame
     let frame = state.display.draw();
     let (w, h) = frame.get_dimensions();
@@ -330,6 +334,8 @@ pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
     state.draw.sel_vbo.clear();
     state.draw.aux_vbo.clear();
     state.draw.aux_text.clear();
+
+    state.draw.timing.mark("frame-init");
 
     // Draw file text, and anything else that requires locking the shared file block
     if let Some(mut ftab) = state.take_ftab(state.cur_tab) {
@@ -400,6 +406,8 @@ pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
         }
     }
 
+    state.draw.timing.mark("draw-tabs");
+
     // Process the queued glyphs, uploading their rasterized images to the GPU
     let res = state
         .draw
@@ -424,6 +432,8 @@ pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
         println!("failed to write font cache: {:#}", err);
     }
 
+    state.draw.timing.mark("upload-tex");
+
     // Generate and upload the text vertex data
     state.draw.sel_vbo.upload(&state.display)?;
     state
@@ -439,10 +449,14 @@ pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
         .aux_text
         .upload_verts(&mut state.draw.glyphs, &state.display)?;
 
+    state.draw.timing.mark("upload-vert");
+
     // Draw non-text file view components
     if let Some(mut ftab) = state.take_ftab(state.cur_tab) {
+        state.draw.timing.push();
         crate::fileview::drawing::draw_notext(state, &mut ftab, &mut ctx)?;
         state.put_ftab(state.cur_tab, ftab);
+        state.draw.timing.pop("file-view");
     }
 
     // Draw the auxiliary decorations
@@ -477,9 +491,18 @@ pub fn draw(state: &mut WindowState) -> Result<Option<Instant>> {
         },
     )?;
 
+    state.draw.timing.mark("draw-decor");
+
     // Swap frame (possibly waiting for vsync)
     let next_redraw = ctx.next_redraw;
     ctx.into_frame().finish()?;
+
+    state.draw.timing.mark("buffer-swap");
+
+    if state.k.log.frame_timing {
+        state.draw.timing.log("frame");
+    }
+    state.draw.timing.clear();
 
     Ok(next_redraw)
 }

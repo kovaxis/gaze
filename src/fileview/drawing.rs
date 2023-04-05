@@ -24,11 +24,15 @@ pub fn draw_withtext(
     let mut file = ftab.file.lock();
     let fview = &mut ftab.view;
 
+    state.draw.timing.mark("file-lock");
+
     let text_view = FileView::text_view(&state.k, fview.view);
 
     // Do any bookkeeping that requires the lock
     // This includes moving the selection, possibly moving the scroll position with it
     fview.bookkeep_file(state, &mut file);
+
+    state.draw.timing.mark("book-keep");
 
     // Determine the bounds of the loaded area, and clamp the scroll position to it
     let scroll_bounds = file.bounding_rect(fview.scroll.pos.base_offset);
@@ -51,6 +55,8 @@ pub fn draw_withtext(
     } else {
         fview.selected.second..fview.selected.first
     };
+
+    state.draw.timing.mark("sync-misc");
 
     // Iterate over all characters on the screen and queue them up for rendering
     let mut sel_box = ScreenRect {
@@ -159,6 +165,8 @@ pub fn draw_withtext(
         }
     }
 
+    state.draw.timing.mark("draw-text");
+
     // Draw cursor
     if let Some(pos) = fview.selected.last_positions[1] {
         let (visible, next) = fview.selected.check_blink(&state.k);
@@ -183,6 +191,8 @@ pub fn draw_withtext(
             );
         }
     }
+
+    state.draw.timing.mark("draw-cursor");
 
     // If the backend is not idle, we should render periodically to show any updates
     if !file.is_backend_idle() || fview.drag.requires_refresh() {

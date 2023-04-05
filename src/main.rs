@@ -39,6 +39,78 @@ mod prelude {
     pub fn default<T: Default>() -> T {
         T::default()
     }
+
+    struct TimingMark {
+        depth: u32,
+        time: Duration,
+        name: &'static str,
+    }
+
+    pub struct TimingLog {
+        marks: Vec<TimingMark>,
+        stack: Vec<Instant>,
+        last: Instant,
+    }
+    impl TimingLog {
+        pub fn new() -> Self {
+            Self {
+                marks: vec![],
+                stack: vec![],
+                last: Instant::now(),
+            }
+        }
+
+        pub fn push(&mut self) {
+            self.stack.push(self.last);
+        }
+
+        pub fn pop(&mut self, name: &'static str) {
+            let now = Instant::now();
+            self.last = self.stack.pop().expect("no timing frame to pop");
+            self.marks.push(TimingMark {
+                depth: self.stack.len() as u32,
+                time: now - self.last,
+                name,
+            });
+            self.last = now;
+        }
+
+        pub fn mark(&mut self, name: &'static str) {
+            let now = Instant::now();
+            self.marks.push(TimingMark {
+                depth: self.stack.len() as u32,
+                time: now - self.last,
+                name,
+            });
+            self.last = now;
+        }
+
+        pub fn log(&mut self, name: &str) {
+            use std::fmt::Write;
+            let mut buf = String::new();
+            let _ = writeln!(buf, "{} timings:", name);
+            for mark in self.marks.iter() {
+                for _ in 0..mark.depth + 1 {
+                    let _ = write!(buf, "  ");
+                }
+                let _ = writeln!(
+                    buf,
+                    "{}: {:.2}ms",
+                    mark.name,
+                    mark.time.as_secs_f64() * 1000.
+                );
+            }
+            print!("{}", buf);
+        }
+
+        pub fn clear(&mut self) {
+            assert!(
+                self.stack.is_empty(),
+                "attempt to clear timing but stack is not empty"
+            );
+            self.marks.clear();
+        }
+    }
 }
 
 mod cfg;

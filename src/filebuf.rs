@@ -26,6 +26,22 @@ pub struct LoadedData {
     pub warn_time: Option<Duration>,
 }
 impl LoadedData {
+    fn new(
+        max_loaded: usize,
+        merge_batch_size: usize,
+        realloc_threshold: usize,
+        warn_time: Option<Duration>,
+    ) -> Self {
+        Self {
+            linemap: LineMap::new(),
+            data: SparseData::new(max_loaded, merge_batch_size, realloc_threshold),
+            hot: default(),
+            sel: None,
+            pending_sel_copy: false,
+            warn_time,
+        }
+    }
+
     fn try_get_hot_range(&self) -> Option<(i64, i64, i64)> {
         // Get bounds
         let base = self.hot.corner.base_offset;
@@ -374,23 +390,16 @@ impl FileBuffer {
             sleeping: false.into(),
             last_file_size: 0.into(),
             layout,
-            loaded: LoadedData {
-                data: SparseData::new(
-                    (k.f.max_loaded_mb * 1024. * 1024.).ceil() as usize,
-                    k.f.merge_batch_size,
-                    k.f.realloc_threshold,
-                ),
-                linemap: LineMap::new(),
-                hot: default(),
-                sel: None,
-                pending_sel_copy: false,
-                warn_time: if k.log.lock_warn_ms < 0. {
+            loaded: Mutex::new(LoadedData::new(
+                (k.f.max_loaded_mb * 1024. * 1024.).ceil() as usize,
+                k.f.merge_batch_size,
+                k.f.realloc_threshold,
+                if k.log.lock_warn_ms < 0. {
                     None
                 } else {
                     Some(Duration::from_secs_f64(k.log.lock_warn_ms / 1000.))
                 },
-            }
-            .into(),
+            )),
             k,
         });
         // TOOD: Check and display errors on the frontend
@@ -460,6 +469,7 @@ impl FileLock<'_> {
     /// `hdiv = 0.5` rounds like `round`, to the closest boundary to `x`
     /// `hdiv = 0` rounds like `ceil`, to the first boundary after `x`
     pub fn lookup_pos(&self, base_offset: i64, y: i64, x: f64, hdiv: f64) -> Option<DataAt> {
+        let coarse = Instant::now();
         let loaded = &*self.loaded;
         let (base, lo) = loaded.linemap.pos_to_anchor(base_offset, y, x)?;
         let mut offset = lo.offset;
@@ -467,6 +477,8 @@ impl FileLock<'_> {
         // NOTE: This subtraction makes no sense if one is relative and the other is absolute
         let mut dx = lo.x_offset - base.x_offset;
         let mut dy = lo.y_offset - base.y_offset;
+        let fine = Instant::now();
+        let mut fine_count = 0;
         // Remove excess data before the target position
         while !data.is_empty() && (dy < y || dy == y && dx < x) {
             let (c, adv) = decode_utf8(data);
@@ -489,8 +501,27 @@ impl FileLock<'_> {
                     dx += hadv;
                 }
             }
+            fine_count += 1;
             data = &data[adv..];
             offset += adv as i64;
+        }
+        if fine_count > 100000 {
+            eprintln!(
+                "{:.4} coarse and {:.4} fine on {} characters",
+                (fine - coarse).as_secs_f64(),
+                fine.elapsed().as_secs_f64(),
+                fine_count
+            );
+            eprintln!(
+                "requested for {}:{}:{}, got {}:{}:{}",
+                base_offset,
+                y,
+                x,
+                lo.offset,
+                lo.y_offset - base.y_offset,
+                lo.x_offset - base.x_offset
+            );
+            self.loaded.linemap.dump_anchors();
         }
         Some(DataAt {
             dy,

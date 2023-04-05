@@ -188,11 +188,7 @@ impl SparseData {
             realloc_size = (l.len() + r.len()).next_power_of_two();
             into_left = match force_into_left {
                 Some(il) => il,
-                None => {
-                    let left_cost = r.len() + if l_realloc { l.capacity() } else { 0 };
-                    let right_cost = l.len() + if r_realloc { r.capacity() } else { 0 };
-                    left_cost <= right_cost
-                }
+                None => r.len() <= l.len(),
             };
         }
         // If we need to carry out a big reallocation, do it off the lock

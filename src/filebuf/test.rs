@@ -1,6 +1,6 @@
 use crate::{
     filebuf::{
-        linemap::{decode_utf8, LineMap, LineMapper},
+        linemap::{decode_utf8, LineMapper},
         sparse::SparseData,
         LoadedData,
     },
@@ -14,19 +14,12 @@ struct TestInst {
 
 fn init(fsize: i64, max_mem: usize) -> TestInst {
     let font = FontArc::try_from_vec(fs::read("font.ttf").unwrap()).unwrap();
-    let mut loaded = LoadedData {
-        linemap: LineMap::new(),
-        data: SparseData::new(usize::MAX, 1024, 1024),
-        hot: default(),
-        sel: None,
-        pending_sel_copy: false,
-        warn_time: None,
-    };
+    let mut loaded = LoadedData::new(usize::MAX, 64, 0, None);
     loaded.linemap.file_size = fsize;
     loaded.data.file_size = fsize;
     TestInst {
         loaded: Mutex::new(loaded),
-        linemapper: LineMapper::new(CharLayout::new(&font), fsize, max_mem, 1024),
+        linemapper: LineMapper::new(CharLayout::new(&font), fsize, max_mem, 3),
     }
 }
 
@@ -47,6 +40,28 @@ struct SegSpec {
     end_y: i64,
     widest: f64,
     rel_width: f64,
+}
+
+fn assert_sanity(t: &TestInst) {
+    let loaded = t.loaded.lock();
+    for s in loaded.linemap.segments.iter() {
+        assert!(s.start < s.end);
+        assert_eq!(s.start, s.anchors.front().unwrap().offset);
+        assert_eq!(s.end, s.anchors.back().unwrap().offset);
+        assert!(s.first_absolute <= s.anchors.len());
+        assert_eq!(s.anchors.front().unwrap().y_offset + s.base_y, 0);
+        for i in 1..s.anchors.len() {
+            let a = s.anchors[i - 1];
+            let b = s.anchors[i];
+            assert!(a.offset < b.offset);
+            assert!(a.y_offset <= b.y_offset);
+        }
+    }
+    for i in 1..loaded.linemap.segments.len() {
+        let s = &loaded.linemap.segments[i];
+        let p = &loaded.linemap.segments[i - 1];
+        assert!(p.end < s.start);
+    }
 }
 
 fn assert_linemap_segs_eq(t: &TestInst, segs: Vec<SegSpec>) {
@@ -85,6 +100,7 @@ fn assert_sparse_data_eq(t: &TestInst, segs: Vec<(i64, Vec<u8>)>) {
 }
 
 fn assert_full_data_loaded(t: &TestInst, data: &[u8]) {
+    assert_sanity(t);
     let mut x = 0.;
     let mut y = 0;
     let mut w = 0f64;
@@ -137,6 +153,7 @@ fn test_in_order(
         let subdata = &data[r.start as usize..r.end as usize];
         t.linemapper.process_data(&t.loaded, r.start, subdata);
         SparseData::insert_data(&t.loaded, r.start, subdata.to_vec());
+        assert_sanity(&t);
     }
     println!("data:\n{}\n", String::from_utf8_lossy(data));
     println!("{:?}", t.loaded.lock().linemap);
@@ -144,14 +161,14 @@ fn test_in_order(
     t
 }
 
-fn rand_binary(seed: u64, len: usize) -> Vec<u8> {
-    let mut data = vec![0; len];
+fn rand_binary(seed: u64, len: i64) -> Vec<u8> {
+    let mut data = vec![0; len as usize];
     let mut rng = TestRng::seed_from_u64(seed);
     rng.fill(&mut data[..]);
     data
 }
 
-fn rand_ascii(seed: u64, len: usize) -> Vec<u8> {
+fn rand_ascii(seed: u64, len: i64) -> Vec<u8> {
     let mut data = rand_binary(seed, len);
     for b in data.iter_mut() {
         *b = *b & 0x7F;
@@ -159,20 +176,20 @@ fn rand_ascii(seed: u64, len: usize) -> Vec<u8> {
     data
 }
 
-fn rand_utf8(seed: u64, len: usize) -> Vec<u8> {
+fn rand_utf8(seed: u64, len: i64) -> Vec<u8> {
     let mut data = String::new();
     let mut rng = TestRng::seed_from_u64(seed);
-    while data.len() < len {
+    while (data.len() as i64) < len {
         let c = if rng.gen_bool(0.01) { '\n' } else { rng.gen() };
         data.push(c);
-        if data.len() > len {
+        if data.len() as i64 > len {
             data.pop();
         }
     }
     data.into_bytes()
 }
 
-fn rand_utf8_blocks(mut seed: u64, block_size: usize, block_count: usize) -> Vec<u8> {
+fn rand_utf8_blocks(mut seed: u64, block_size: i64, block_count: i64) -> Vec<u8> {
     let mut data = Vec::new();
     for _ in 0..block_count {
         data.append(&mut rand_utf8(seed, block_size));
@@ -183,55 +200,96 @@ fn rand_utf8_blocks(mut seed: u64, block_size: usize, block_count: usize) -> Vec
 
 #[test]
 fn sequential() {
+    let b = 16;
+    let n = 256;
     test_in_order(
-        &rand_utf8_blocks(0xdaba, 256, 16),
+        &rand_utf8_blocks(0xdaba, b, n),
         2 * 1024,
-        (0..16).map(|i| 256 * i..256 * (i + 1)),
+        (0..n).map(|i| b * i..b * i + b),
     );
 }
 
 #[test]
-fn sequential_rev() {
+fn reverse() {
+    let n = 4;
+    let b = 256;
     test_in_order(
-        &rand_utf8_blocks(0xdabb, 256, 16),
+        &rand_utf8_blocks(0xdabb, b, n),
         2 * 1024,
-        (0..16).map(|i| 256 * i..256 * (i + 1)).rev(),
+        (0..n).map(|i| b * i..b * (i + 1)).rev(),
     );
 }
 
 #[test]
 fn checkers() {
+    let n = 16;
+    let b = 256;
     test_in_order(
-        &rand_utf8_blocks(0xdabc, 64, 256),
+        &rand_utf8_blocks(0xdabc, b, n),
         2 * 1024,
-        (0..128)
-            .map(|i| 64 * (2 * i)..64 * (2 * i + 1))
-            .chain((0..128).map(|i| 64 * (2 * i + 1)..64 * (2 * i + 2))),
+        (0..n / 2)
+            .map(|i| b * (2 * i)..b * (2 * i + 1))
+            .chain((0..n / 2).map(|i| b * (2 * i + 1)..b * (2 * i + 2))),
     );
 }
 
 #[test]
-fn shuffled() {
+fn treelike() {
+    let n = 10;
+    let b = 256;
+    let mut order = vec![0..b];
+    for bit in 0..n {
+        for i in 0..(1 << n) {
+            if (i >> bit) & 1 != 0 {
+                order.push(i * b..(i + 1) * b);
+            }
+        }
+    }
+    test_in_order(
+        &rand_utf8_blocks(0xde092eadbbbb, b, 1 << n),
+        2 * 1024,
+        order,
+    );
+}
+
+#[test]
+fn meet_in_the_middle() {
+    let n = 16;
+    let b = 256;
+    test_in_order(
+        &rand_utf8_blocks(0xde092e19db, b, n),
+        2 * 1024,
+        (0..n / 2)
+            .map(|i| i * b..(i + 1) * b)
+            .chain((n / 2..n).rev().map(|i| i * b..(i + 1) * b)),
+    );
+}
+
+#[test]
+fn shuffled_blocks() {
+    let n = 256;
+    let b = 256;
     let mut rng = TestRng::seed_from_u64(0xdeadbeeeee);
-    let mut blocks = vec![0; 256];
+    let mut blocks = vec![0; n as usize];
     for (i, b) in blocks.iter_mut().enumerate() {
         *b = i as i64;
     }
     blocks.shuffle(&mut rng);
 
     test_in_order(
-        &rand_utf8_blocks(0xdabd, 64, 256),
+        &rand_utf8_blocks(0xdabd, b, n),
         2 * 1024,
-        blocks.iter().map(|&i| 64 * i..64 * (i + 1)),
+        blocks.iter().map(|&i| b * i..b * (i + 1)),
     );
 }
 
 #[test]
-fn unequal() {
+fn unequal_sequential() {
+    let n = 256;
+    let size: i64 = 256 * 256;
     let mut rng = TestRng::seed_from_u64(0xabcdef);
-    let size: i64 = 64 * 256;
     let mut splits = vec![];
-    for _ in 0..255 {
+    for _ in 0..n - 1 {
         splits.push(rng.gen_range(1..size));
     }
     splits.push(0);
@@ -239,39 +297,40 @@ fn unequal() {
     splits.sort();
 
     test_in_order(
-        &rand_ascii(0xdabe, size as usize),
+        &rand_ascii(0xdabe, size),
         2 * 1024,
-        (0..256).map(|i| splits[i]..splits[i + 1]),
+        (0..n).map(|i| splits[i]..splits[i + 1]),
     );
 }
 
 #[test]
 fn unequal_shuffled() {
     let mut rng = TestRng::seed_from_u64(0xabcdef);
-    let size: i64 = 64 * 256;
+    let n = 256;
+    let size: i64 = 256 * 256;
     let mut splits = vec![];
-    for _ in 0..255 {
+    for _ in 0..n - 1 {
         splits.push(rng.gen_range(1..size));
     }
     splits.push(0);
     splits.push(size);
     splits.sort();
 
-    let mut order = vec![0; 256];
+    let mut order = vec![0; n];
     for (i, b) in order.iter_mut().enumerate() {
         *b = i;
     }
     order.shuffle(&mut rng);
 
     test_in_order(
-        &rand_ascii(0xdabf, size as usize),
+        &rand_ascii(0xdabf, size),
         2 * 1024,
         order.iter().map(|&i| splits[i]..splits[i + 1]),
     );
 }
 
 #[test]
-fn binary_babysteps() {
+fn binary_babysteps_seq() {
     let data = rand_binary(0xbadeefdab, 32 * 1024);
     let t = init(data.len() as i64, 2 * 1024);
     let mut rsize = 1;

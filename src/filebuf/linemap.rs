@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, ops::DerefMut};
 
 use crate::prelude::*;
 
@@ -205,6 +205,37 @@ impl LineMap {
             }
         }
     }
+
+    /// Dump the linemap data for debugging.
+    pub(super) fn dump_anchors(&self) {
+        eprintln!("dumping anchors...");
+        println!("{} segments", self.segments.len());
+        for seg in self.segments.iter() {
+            println!("segment [{}, {})", seg.start, seg.end);
+            println!("  base_x: {}, base_y: {}", seg.base_x_relative, seg.base_y);
+            println!(
+                "  rel_width: {}, widest_line: {}",
+                seg.rel_width, seg.widest_line
+            );
+            println!(
+                "  first_absolute: {} ({:?})",
+                seg.first_absolute,
+                seg.anchors.get(seg.first_absolute)
+            );
+            println!("  {} anchors:", seg.anchors.len());
+            for anchor in seg.anchors.iter() {
+                println!(
+                    "    off: {}, dy: {} ({}), dx: {} ({})",
+                    anchor.offset,
+                    anchor.y(seg),
+                    anchor.y_offset,
+                    anchor.x(seg),
+                    anchor.x_offset,
+                );
+            }
+        }
+        eprintln!("dumped anchors...");
+    }
 }
 impl fmt::Debug for LineMap {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -298,12 +329,13 @@ impl LineMapper {
         }
 
         let end = offset + data.len() as i64;
+        let rand = ((offset + 143) as u32).wrapping_mul(0x9e3779b9);
         let mut seg = {
             MappedSegment {
                 start: offset,
                 end,
-                base_y: 100,
-                base_x_relative: 100.,
+                base_y: (rand & 0xFFFF) as i64,
+                base_x_relative: (rand >> 16) as f64,
                 first_absolute: 0,
                 widest_line: 0.,
                 rel_width: 0.,
@@ -383,6 +415,16 @@ impl LineMapper {
             // doing this correctly is way too expensive with the current implementation
             // The length of the relative line will also be temporarily wrong
             let (l, r) = get_two(lmap, l_idx);
+            /*{
+                let a = mem::take(&mut l.anchors);
+                let b = mem::take(&mut r.anchors);
+                eprintln!(
+                    "merging with into_left = {:?}, lseg = {:?} ({} anchors), rseg = {:?} ({} anchors)",
+                    into_left, l, a.len(), r, b.len(),
+                );
+                l.anchors = a;
+                r.anchors = b;
+            }*/
             let mut wide = l.widest_line.max(r.widest_line);
             if l.first_absolute < l.anchors.len() {
                 // Factor the absolute line that is created by tacking the relative
@@ -450,6 +492,23 @@ impl LineMapper {
                     ldst.first_absolute = og_ldst_len - 1 + rsrc.first_absolute.min(batch_size + 1);
                 }
                 rsrc.first_absolute = rsrc.first_absolute.saturating_sub(batch_size);
+                // Determine how much to shift down the right segment
+                let rsrc_old_start = *rsrc.anchors.front().unwrap();
+                let rsrc_new_start = rsrc.anchors[batch_size];
+                let shift_y = rsrc_old_start.y_offset - rsrc_new_start.y_offset;
+                // TODO: This is actually all wrong
+                // Because we want to keep the first anchor at position zero,
+                // when removing a prefix we might convert some absolute anchors
+                // into relative ones, and this has no easy fix.
+                // Just give up in this case
+                // This requires better data-structures, and is part of the
+                // reason I'm planning a refactor
+                let shift_x = if og_rsrc_first_absolute > batch_size {
+                    rsrc_old_start.x_offset - rsrc_new_start.x_offset
+                } else {
+                    0.
+                };
+                // Migrate anchor-by-anchor
                 for i in 0..batch_size + 1 {
                     let mut a = *rsrc.anchors.front().unwrap();
                     if i != batch_size {
@@ -484,6 +543,9 @@ impl LineMapper {
                     }
                     ldst.anchors.push_back(a);
                 }
+                // Shift the right segment down by whatever was removed
+                rsrc.base_y += shift_y;
+                rsrc.base_x_relative += shift_x;
                 // Keep the end and start offsets in sync with the endpoint anchors
                 let src_start_anchor = rsrc.anchors.front().unwrap();
                 ldst.end = src_start_anchor.offset;
@@ -498,14 +560,14 @@ impl LineMapper {
                 // Remove the end anchor of the left segment because it is redundant with
                 // the start anchor of the right segment
                 let og_lsrc_len = lsrc.anchors.len();
-                let src_cap_anchor = lsrc.anchors.pop_back().unwrap();
+                let lsrc_cap_anchor = lsrc.anchors.pop_back().unwrap();
                 // Get the anchor that will be the end of the left segment/start of the right segment
-                let src_end_idx = lsrc.anchors.len() - batch_size;
+                let src_end_idx = og_lsrc_len - 1 - batch_size;
                 let src_end_anchor = lsrc.anchors[src_end_idx];
                 // Shift the right segment by the width/height that we are migrating
-                let shift_y = src_cap_anchor.y_offset - src_end_anchor.y_offset;
+                let shift_y = lsrc_cap_anchor.y_offset - src_end_anchor.y_offset;
                 let shift_x = if lsrc.first_absolute >= og_lsrc_len {
-                    src_cap_anchor.x_offset - src_end_anchor.x_offset
+                    lsrc_cap_anchor.x_offset - src_end_anchor.x_offset
                 } else {
                     0.
                 };
@@ -524,6 +586,7 @@ impl LineMapper {
                 rdst.base_x_relative += shift_x;
                 for i in (0..batch_size).rev() {
                     let mut a = *lsrc.anchors.back().unwrap();
+                    let old_a = a;
                     if i != 0 {
                         // Do not remove the last anchor, because it is both the end anchor
                         // of the left segment and the start anchor of the right segment,
@@ -534,13 +597,20 @@ impl LineMapper {
                     let src_abs = og_lsrc_len - 1 - batch_size + i >= og_lsrc_first_absolute;
                     match src_abs {
                         false => {
-                            // Convert between bases
-                            a.x_offset = a.x_offset + (lsrc.base_x_relative - rdst.base_x_relative);
+                            // Old position was relative to the start of the left segment
+                            // New position needs to be relative to `src_end_anchor`,
+                            // because that will be the new start of the right segment
+                            a.x_offset =
+                                a.x_offset + (-src_end_anchor.x_offset - rdst.base_x_relative);
                         }
                         true => {} // No conversion
                     }
-                    a.y_offset = a.y_offset + (lsrc.base_y - rdst.base_y);
+                    a.y_offset = a.y_offset + (-src_end_anchor.y_offset - rdst.base_y);
                     rdst.anchors.push_front(a);
+                    // eprintln!(
+                    //     "moved anchor from left as {:?} into right as {:?} with lsrc_abs = {:?} and rdst_abs = {:?}?",
+                    //     old_a, a, src_abs, true,
+                    // );
                 }
                 // Keep the end and start offsets in sync with the endpoint anchors
                 let rdst_start_anchor = rdst.anchors.front().unwrap();
@@ -554,6 +624,47 @@ impl LineMapper {
         }
         // Finally, remove the empty source segment
         lmap.segments.remove(l_idx + if into_left { 1 } else { 0 });
+        // TEST: Sanity check
+        /*println!(
+            "doing sanity check after merging (into_left = {:?})",
+            into_left
+        );
+        struct DumpOnPanic<'a>(&'a LineMap);
+        impl Drop for DumpOnPanic<'_> {
+            fn drop(&mut self) {
+                self.0.dump_anchors();
+            }
+        }
+        let dump = DumpOnPanic(lmap);
+        let mut touching = false;
+        for s in lmap.segments.iter() {
+            if s.start >= s.end {
+                touching = true;
+            }
+            assert_eq!(s.start, s.anchors.front().unwrap().offset);
+            assert_eq!(s.end, s.anchors.back().unwrap().offset);
+            assert!(s.first_absolute <= s.anchors.len());
+            assert_eq!(s.anchors.front().unwrap().y_offset + s.base_y, 0);
+            for i in 1..s.anchors.len() {
+                let a = s.anchors[i - 1];
+                let b = s.anchors[i];
+                assert!(a.offset < b.offset);
+                assert!(a.y_offset <= b.y_offset);
+            }
+        }
+        for i in 1..lmap.segments.len() {
+            let s = &lmap.segments[i];
+            let p = &lmap.segments[i - 1];
+            if p.end >= s.start {
+                touching = true;
+            }
+        }
+        mem::forget(dump);
+        if touching {
+            println!("adjacent/empty segments are present, dumping...");
+            eprintln!("adjacent/empty segments are present, dumping...");
+            lmap.dump_anchors();
+        }*/
     }
 
     fn insert_segment(&self, linemap: LineMapHandle, seg: MappedSegment) {
@@ -591,6 +702,9 @@ impl LineMapper {
             }
         }
         // insert segment, possibly adjacent to the nearby segments
+        if merge_left && merge_right {
+            println!("merging left & right at [{}, {})", seg.start, seg.end);
+        }
         lmap.segments.splice(i..j, std::iter::once(seg));
         // slowly merge the segments, regularly unlocking the linemap
         drop(lmap_store);
@@ -637,6 +751,12 @@ impl LineMapper {
             };
             // process data first without locking the linemap
             let seg = self.create_segment(l, &data[..(r - l) as usize], rigid_left, rigid_right);
+            if l != r {
+                println!(
+                    "processing segment [{}, {}) resulting from [{}, {})",
+                    seg.start, seg.end, l, r
+                );
+            }
             rigid_left = true;
             // insert the data into the linemap
             self.insert_segment(linemap, seg);
