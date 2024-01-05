@@ -601,34 +601,48 @@ impl FileLock<'_> {
         self.filebuf.shared.sleeping.load()
     }
 
-    /// Moves the given offset by a certain amount of characters.
-    ///
-    /// O(n) in the amount of characters due to UTF-8.
-    /// May not have enough data to complete the offset.
-    /// In this case, it fails but returns the farthest it could get.
-    pub fn char_delta(&self, mut offset: i64, delta: i16) -> StdResult<i64, i64> {
-        if delta < 0 {
-            // Move backwards
-            let mut data = self.loaded.data.longest_suffix(offset);
-            for _ in 0..-delta {
-                if data.is_empty() {
-                    return Err(offset);
-                }
-                let (_c, rev) = decode_utf8_rev(data);
-                data = &data[..data.len() - rev];
-                offset -= rev as i64;
+    /// Start from the given offset, and go character-by-character.
+    /// If unloaded data is reached before `should_adv` returns `false`,
+    /// returns `Err` containing the furthest offset that it got to.
+    pub fn forward_while(
+        &self,
+        mut offset: i64,
+        mut should_adv: impl FnMut(i64, i64, StdResult<u32, u8>) -> bool,
+    ) -> Result<i64, i64> {
+        let mut data = self.loaded.data.longest_prefix(offset);
+        loop {
+            if data.is_empty() {
+                return Err(offset);
             }
-        } else {
-            // Move forwards
-            let mut data = self.loaded.data.longest_prefix(offset);
-            for _ in 0..delta {
-                if data.is_empty() {
-                    return Err(offset);
-                }
-                let (_c, adv) = decode_utf8(data);
-                data = &data[adv..];
-                offset += adv as i64;
+            let (c, adv) = decode_utf8(data);
+            if !should_adv(offset, offset + adv as i64, c) {
+                break;
             }
+            data = &data[adv..];
+            offset += adv as i64;
+        }
+        Ok(offset)
+    }
+
+    /// Start from the given offset, and go character-by-character backwards.
+    /// If unloaded data is reached before `should_adv` returns `false`,
+    /// returns `Err` containing the furthest offset that it got to.
+    pub fn backward_while(
+        &self,
+        mut offset: i64,
+        mut should_adv: impl FnMut(i64, i64, StdResult<u32, u8>) -> bool,
+    ) -> Result<i64, i64> {
+        let mut data = self.loaded.data.longest_suffix(offset);
+        loop {
+            if data.is_empty() {
+                return Err(offset);
+            }
+            let (c, rev) = decode_utf8_rev(data);
+            if !should_adv(offset - rev as i64, offset, c) {
+                break;
+            }
+            data = &data[..data.len() - rev];
+            offset -= rev as i64;
         }
         Ok(offset)
     }

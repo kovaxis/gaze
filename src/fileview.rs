@@ -220,6 +220,10 @@ enum MoveKind {
     Raw(i64),
     /// Move a number of characters to the left/right.
     CharDelta(i16),
+    /// Move a number of words to the left/right.
+    /// Because moving through characters is O(n), requires a bound
+    /// on the size of words.
+    WordDelta { delta: i16, max_word_len: u16 },
     /// Move a number of lines up/down.
     LineDelta(i64),
     /// Move a certain spacial distance left/right.
@@ -484,12 +488,36 @@ impl FileView {
                     // Select based on a raw file offset
                     self.selected.second = off;
                 }
-                MoveKind::CharDelta(delta) => {
+                MoveKind::CharDelta(mut delta) => {
                     // Move the current selection by this amount of characters
                     // TODO: This may leave the cursor in the middle of a UTF-8 character
                     // if we are at the edge of loaded data
                     // Figure out what to do about it
-                    let off = file.char_delta(current, delta).unwrap_or_else(|e| e);
+                    let off = if delta >= 0 {
+                        file.forward_while(current, |_, _, _| {
+                            delta -= 1;
+                            delta >= 0
+                        })
+                    } else {
+                        file.backward_while(current, |_, _, _| {
+                            delta += 1;
+                            delta <= 0
+                        })
+                    }
+                    .unwrap_or_else(|e| e);
+                    self.selected.second = off;
+                }
+                MoveKind::WordDelta {
+                    mut delta,
+                    max_word_len,
+                } => {
+                    // Move the current selection by this amount of words
+                    // Word boundaries are kind of arbitrary
+                    let off = if delta >= 0 {
+                        file.forward_while(current, |_, _, c| {})
+                    } else {
+                    }
+                    .unwrap_or_else(|e| e);
                     self.selected.second = off;
                 }
                 MoveKind::LineDelta(delta) => {
