@@ -14,4 +14,4 @@ nix = { version = "0.26", default-features = false, features = ["process"] }
 native-dialog = { version = "0.6" }
 
 [lib]
-crate-type = ["dylib"]
+# crate-type = ["dylib"]
